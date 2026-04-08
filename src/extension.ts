@@ -1,37 +1,112 @@
 import * as vscode from 'vscode';
 
 export function activate(context: vscode.ExtensionContext) {
-	const disposable = vscode.commands.registerCommand('mushroom-pce.start', async () => {
-		const editor = vscode.window.activeTextEditor;
+	let latestRunId = 0;
+	const output = vscode.window.createOutputChannel('Mushroom PCE');
+	let lastDocument: vscode.TextDocument | undefined;
 
+	const rememberEditor = (editor: vscode.TextEditor | undefined): void => {
 		if (!editor) {
-			vscode.window.showErrorMessage('Please open a file to analyze.');
 			return;
 		}
 
-		const code = editor.document.getText();
-		const panel = MushroomPanel.createOrShow(context.extensionUri);
+		if (editor.document.uri.scheme === 'file' || editor.document.uri.scheme === 'untitled') {
+			lastDocument = editor.document;
+		}
+	};
 
+	rememberEditor(vscode.window.activeTextEditor);
+
+	const runAnalysis = async (panel: MushroomPanel): Promise<void> => {
+		output.appendLine('runAnalysis invoked');
+		if (panel.isDisposed()) {
+			output.appendLine('runAnalysis aborted: panel disposed');
+			return;
+		}
+
+		const editor = vscode.window.activeTextEditor;
+		const document = editor?.document ?? lastDocument;
+		if (!document) {
+			output.appendLine('runAnalysis aborted: no active editor');
+			panel.setStatus('Open a file to analyze');
+			panel.setExplanation('Open a code file in the editor, then click Analyze.');
+			panel.setAnalyzing(false);
+			return;
+		}
+		lastDocument = document;
+
+		const code = document.getText();
+		if (!code.trim()) {
+			output.appendLine('runAnalysis aborted: empty file');
+			panel.setStatus('No code detected');
+			panel.setExplanation('Type or paste code in the active file, then click Analyze.');
+			panel.setAnalyzing(false);
+			return;
+		}
+
+		const runId = ++latestRunId;
 		panel.clear();
-		panel.setStatus('Analyzing your file...');
+		panel.setAnalyzing(true);
+		panel.setStatus('Analyzing...');
+		output.appendLine(`Analyzing language=${document.languageId}, chars=${code.length}`);
 
 		let streamed = false;
-		const explanation = await explainCode(code, (chunk) => {
+		const explanation = await explainCode(code, document.languageId, (chunk) => {
+			if (runId !== latestRunId || panel.isDisposed()) {
+				return;
+			}
 			streamed = true;
 			panel.appendChunk(chunk);
 		});
+
+		if (runId !== latestRunId || panel.isDisposed()) {
+			return;
+		}
 
 		if (!streamed) {
 			panel.setExplanation(explanation || 'No explanation generated.');
 		}
 
-		panel.setStatus('Done');
+		panel.setAnalyzing(false);
+		panel.setStatus(`Updated at ${new Date().toLocaleTimeString()}`);
+		output.appendLine('runAnalysis completed');
+	};
+
+	const analyzeCommand = vscode.commands.registerCommand('mushroom-pce.analyzeActive', async () => {
+		output.appendLine('mushroom-pce.analyzeActive command triggered');
+		const panel = MushroomPanel.getCurrentPanel();
+		if (!panel || panel.isDisposed()) {
+			vscode.window.showInformationMessage('Run "Start Mushroom PCE" first.');
+			output.appendLine('analyzeActive failed: panel missing');
+			return;
+		}
+
+		await runAnalysis(panel);
 	});
 
-	context.subscriptions.push(disposable);
+	const startCommand = vscode.commands.registerCommand('mushroom-pce.start', async () => {
+		const panel = MushroomPanel.createOrShow();
+
+		panel.setStatus('Ready');
+		panel.setExplanation('Click Analyze to explain the active file.');
+		output.appendLine('mushroom-pce.start command triggered');
+		await vscode.commands.executeCommand('mushroom-pce.analyzeActive');
+	});
+	
+	const statusBarAnalyze = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+	statusBarAnalyze.text = '$(sparkle) PCE Analyze';
+	statusBarAnalyze.tooltip = 'Analyze active file with Mushroom PCE';
+	statusBarAnalyze.command = 'mushroom-pce.analyzeActive';
+	statusBarAnalyze.show();
+
+	const onEditorChange = vscode.window.onDidChangeActiveTextEditor((editor) => {
+		rememberEditor(editor);
+	});
+
+	context.subscriptions.push(startCommand, analyzeCommand, statusBarAnalyze, output, onEditorChange);
 }
 
-async function explainCode(code: string, onChunk?: (chunk: string) => void): Promise<string | undefined> {
+async function explainCode(code: string, languageId: string, onChunk?: (chunk: string) => void): Promise<string | undefined> {
 	try {
 		const models = await vscode.lm.selectChatModels();
 
@@ -42,25 +117,35 @@ async function explainCode(code: string, onChunk?: (chunk: string) => void): Pro
 
 		const model = models[0];
 
-		const messages = [
-			new vscode.LanguageModelChatMessage(
-				vscode.LanguageModelChatMessageRole.User,
-				`
-You are a friendly programming teacher.
+		const prompt = `
+You are a friendly programming teacher for beginners.
 
-Explain this code in simple terms.
+Return Markdown only. Keep it clean and easy to read.
 
-Break it into:
-1. Functions
-2. Variables
-3. Imports
-4. Step-by-step explanation
-5. Story explanation
+Required structure (use exactly these headings):
+# Quick Summary
+# Imports
+# Functions
+# Variables and State
+# Step-by-Step Flow
+# Beginner Story
+# Key Takeaways
 
-Code:
+Formatting rules:
+- Use short bullet points.
+- Do not use markdown tables.
+- Use backticks for code identifiers.
+- If a section has no items, write: - None
+- Keep explanations simple and visual.
+
+Code (${languageId}):
+\`\`\`${languageId}
 ${code}
-				`
-			)
+\`\`\`
+`;
+
+		const messages = [
+			new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, prompt)
 		];
 
 		const response = await model.sendRequest(messages);
@@ -136,9 +221,17 @@ class MushroomPanel {
 	private static currentPanel: MushroomPanel | undefined;
 	private readonly panel: vscode.WebviewPanel;
 	private readonly disposables: vscode.Disposable[] = [];
+	private disposed = false;
+	private status = 'Ready';
+	private rawText = 'Click Analyze to explain the active file.';
+	private analyzing = false;
 
-	static createOrShow(extensionUri: vscode.Uri): MushroomPanel {
-		if (MushroomPanel.currentPanel) {
+	static getCurrentPanel(): MushroomPanel | undefined {
+		return MushroomPanel.currentPanel;
+	}
+
+	static createOrShow(): MushroomPanel {
+		if (MushroomPanel.currentPanel && !MushroomPanel.currentPanel.isDisposed()) {
 			MushroomPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
 			return MushroomPanel.currentPanel;
 		}
@@ -149,21 +242,23 @@ class MushroomPanel {
 			vscode.ViewColumn.Beside,
 			{
 				enableScripts: true,
+				enableCommandUris: true,
 				retainContextWhenHidden: true
 			}
 		);
 
-		MushroomPanel.currentPanel = new MushroomPanel(panel, extensionUri);
+		MushroomPanel.currentPanel = new MushroomPanel(panel);
 		return MushroomPanel.currentPanel;
 	}
 
-	private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+	private constructor(panel: vscode.WebviewPanel) {
 		this.panel = panel;
-		this.panel.webview.html = this.getHtml(this.panel.webview, extensionUri);
+		this.render();
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 	}
 
 	dispose(): void {
+		this.disposed = true;
 		MushroomPanel.currentPanel = undefined;
 		while (this.disposables.length) {
 			const item = this.disposables.pop();
@@ -171,46 +266,69 @@ class MushroomPanel {
 		}
 	}
 
+	isDisposed(): boolean {
+		return this.disposed;
+	}
+
 	clear(): void {
-		this.postMessage({ type: 'clear' });
+		this.rawText = '';
+		this.render();
 	}
 
 	appendChunk(chunk: string): void {
-		this.postMessage({ type: 'append', value: chunk });
+		this.rawText += chunk;
+		this.render();
 	}
 
 	setExplanation(text: string): void {
-		this.postMessage({ type: 'set', value: text });
+		this.rawText = text;
+		this.render();
 	}
 
 	setStatus(text: string): void {
-		this.postMessage({ type: 'status', value: text });
+		this.status = text;
+		this.render();
 	}
 
-	private postMessage(message: { type: string; value?: string }): void {
-		void this.panel.webview.postMessage(message);
+	setAnalyzing(isAnalyzing: boolean): void {
+		this.analyzing = isAnalyzing;
+		this.render();
 	}
 
-	private getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
-		const nonce = getNonce();
+	private render(): void {
+		if (this.disposed) {
+			return;
+		}
+		this.panel.webview.html = this.getHtml(this.panel.webview, this.status, this.rawText, this.analyzing);
+	}
+
+	private getHtml(webview: vscode.Webview, status: string, text: string, analyzing: boolean): string {
 		const cspSource = webview.cspSource;
-		const _styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'src'));
+		const explainHtml = markdownToHtml(text);
+		const buttonHtml = analyzing
+			? '<span class="analyze-btn disabled">Analyzing...</span>'
+			: '<a id="analyzeBtn" class="analyze-btn" href="command:mushroom-pce.analyzeActive">Analyze</a>';
 
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mushroom PCE</title>
   <style>
     :root {
-      --bg: #0f172a;
-      --panel: #111827;
-      --text: #e5e7eb;
-      --muted: #94a3b8;
+      --bg: #0b1020;
+      --panel: #0f172a;
+      --text: #e2e8f0;
+      --muted: #9fb0cc;
       --accent: #22c55e;
-      --border: #1f2937;
+      --border: #21304d;
+      --code-bg: #0b1225;
+      --heading: #f8fafc;
+      --btn: #16a34a;
+      --btn-hover: #15803d;
+      --btn-disabled: #334155;
     }
     body {
       margin: 0;
@@ -235,89 +353,216 @@ class MushroomPanel {
       padding-bottom: 10px;
     }
     .title {
+      font-size: 18px;
       font-weight: 700;
-      letter-spacing: 0.3px;
+      letter-spacing: 0.2px;
+      color: var(--heading);
     }
     .status {
       color: var(--muted);
       font-size: 12px;
     }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .analyze-btn {
+      display: inline-block;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #ffffff;
+      background: var(--btn);
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .analyze-btn:hover {
+      background: var(--btn-hover);
+    }
+    .analyze-btn.disabled {
+      background: var(--btn-disabled);
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+    .fallback-link {
+      color: #93c5fd;
+      font-size: 12px;
+      text-decoration: none;
+    }
+    .fallback-link:hover {
+      text-decoration: underline;
+    }
     .content {
       flex: 1;
       overflow-y: auto;
-      background: color-mix(in oklab, var(--panel) 92%, black);
+      background: color-mix(in oklab, var(--panel) 95%, black);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 14px;
-      line-height: 1.5;
-      white-space: pre-wrap;
+      border-radius: 12px;
+      padding: 16px;
+      line-height: 1.65;
+      font-size: 14px;
     }
-    .hint {
-      color: var(--muted);
-      font-size: 12px;
+    .content h1,
+    .content h2,
+    .content h3 {
+      margin: 16px 0 8px;
+      color: var(--heading);
+      line-height: 1.35;
+    }
+    .content h1 { font-size: 20px; }
+    .content h2 { font-size: 17px; }
+    .content h3 { font-size: 15px; }
+    .content p { margin: 8px 0; }
+    .content ul,
+    .content ol {
+      margin: 8px 0 8px 20px;
+      padding: 0;
+    }
+    .content li { margin: 4px 0; }
+    .content code {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+    }
+    .content pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      overflow-x: auto;
+      margin: 10px 0;
+    }
+    .content pre code {
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding: 0;
     }
     .dot {
-      width: 8px;
-      height: 8px;
+      width: 9px;
+      height: 9px;
       border-radius: 999px;
       display: inline-block;
-      margin-right: 6px;
+      margin-right: 8px;
       background: var(--accent);
       box-shadow: 0 0 10px color-mix(in oklab, var(--accent) 65%, white);
     }
+    .spacer { height: 4px; }
+    .hint { color: var(--muted); font-size: 12px; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="header">
       <div class="title"><span class="dot"></span>Mushroom PCE</div>
-      <div class="status" id="status">Ready</div>
+      <div class="status">${escapeHtml(status)}</div>
     </div>
-    <div class="content" id="content">Run "Start Mushroom PCE" to analyze the active file.</div>
-    <div class="hint">Beginner-friendly code explanations appear here with live streaming.</div>
+    <div class="toolbar">
+      ${buttonHtml}
+      <a class="fallback-link" href="command:mushroom-pce.analyzeActive">Analyze (fallback)</a>
+      <div class="hint">Update your code, then click Analyze.</div>
+    </div>
+    <div class="content">${explainHtml}</div>
   </div>
-  <script nonce="${nonce}">
-    const vscodeApi = acquireVsCodeApi();
-    const content = document.getElementById('content');
-    const status = document.getElementById('status');
-
-    window.addEventListener('message', (event) => {
-      const message = event.data;
-      if (!message) return;
-
-      if (message.type === 'clear') {
-        content.textContent = '';
-        return;
-      }
-
-      if (message.type === 'append') {
-        content.textContent += message.value || '';
-        content.scrollTop = content.scrollHeight;
-        return;
-      }
-
-      if (message.type === 'set') {
-        content.textContent = message.value || '';
-        return;
-      }
-
-      if (message.type === 'status') {
-        status.textContent = message.value || '';
-      }
-    });
-
-    vscodeApi.setState({ ready: true });
-  </script>
 </body>
 </html>`;
 	}
 }
 
-function getNonce(): string {
-	let text = '';
-	const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-	for (let i = 0; i < 32; i++) {
-		text += possible.charAt(Math.floor(Math.random() * possible.length));
+function markdownToHtml(markdown: string): string {
+	if (!markdown.trim()) {
+		return '<p>Click Analyze to explain the active file.</p>';
 	}
-	return text;
+
+	const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+	const out: string[] = [];
+	let inCode = false;
+	let listMode: '' | 'ul' | 'ol' = '';
+
+	const closeList = () => {
+		if (listMode === 'ul') {
+			out.push('</ul>');
+		}
+		if (listMode === 'ol') {
+			out.push('</ol>');
+		}
+		listMode = '';
+	};
+
+	for (const rawLine of lines) {
+		const line = rawLine.trim();
+		if (line.startsWith('```')) {
+			closeList();
+			out.push(inCode ? '</code></pre>' : '<pre><code>');
+			inCode = !inCode;
+			continue;
+		}
+		if (inCode) {
+			out.push(`${escapeHtml(rawLine)}\n`);
+			continue;
+		}
+		if (!line) {
+			closeList();
+			continue;
+		}
+		if (line.startsWith('### ')) {
+			closeList();
+			out.push(`<h3>${inlineMd(line.slice(4))}</h3>`);
+			continue;
+		}
+		if (line.startsWith('## ')) {
+			closeList();
+			out.push(`<h2>${inlineMd(line.slice(3))}</h2>`);
+			continue;
+		}
+		if (line.startsWith('# ')) {
+			closeList();
+			out.push(`<h1>${inlineMd(line.slice(2))}</h1>`);
+			continue;
+		}
+		if (/^[-*]\s+/.test(line)) {
+			if (listMode !== 'ul') {
+				closeList();
+				out.push('<ul>');
+				listMode = 'ul';
+			}
+			out.push(`<li>${inlineMd(line.replace(/^[-*]\s+/, ''))}</li>`);
+			continue;
+		}
+		if (/^\d+\.\s+/.test(line)) {
+			if (listMode !== 'ol') {
+				closeList();
+				out.push('<ol>');
+				listMode = 'ol';
+			}
+			out.push(`<li>${inlineMd(line.replace(/^\d+\.\s+/, ''))}</li>`);
+			continue;
+		}
+		closeList();
+		out.push(`<p>${inlineMd(line)}</p>`);
+	}
+	closeList();
+	return out.join('') || '<p>No explanation generated.</p>';
+}
+
+function inlineMd(text: string): string {
+	let result = escapeHtml(text);
+	result = result.replace(/\x60([^\x60]+)\x60/g, '<code>$1</code>');
+	result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+	return result;
+}
+
+function escapeHtml(value: string): string {
+	return value
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;');
 }
