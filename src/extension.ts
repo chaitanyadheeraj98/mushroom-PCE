@@ -284,15 +284,21 @@ export function activate(context: vscode.ExtensionContext) {
 async function explainCode(model: vscode.LanguageModelChat, code: string, languageId: string, onChunk?: (chunk: string) => void): Promise<string | undefined> {
 	try {
 		const prompt = `
-You are a friendly programming teacher for beginners.
+You are a friendly programming teacher for complete beginners.
 
-Return Markdown only. Keep it clean and easy to read.
+Return Markdown only. Keep it clean, simple, and easy to read.
 
 Required structure (use exactly these headings):
 # Quick Summary
-# Imports
+# Logic and Flow
 # Functions
-# Variables and State
+# Data Structures
+# Program Structure
+# Debugging and Quality
+# Real-World Reading Path
+# Imports and External Packages
+# Example Input and Output
+# Important Lines Explained
 # Step-by-Step Flow
 # Beginner Story
 # Key Takeaways
@@ -303,7 +309,27 @@ Formatting rules:
 - Use backticks for code identifiers.
 - When referencing a symbol, wrap only the bare identifier in backticks (for example, \`myFunction\`, not \`myFunction(arg)\`).
 - If a section has no items, write: - None
-- Keep explanations simple and visual.
+- Keep explanations simple, visual, and beginner-friendly.
+- Start with what the code is trying to achieve in 1-2 sentences.
+- Explain every new technical term in one short line.
+- Explain not only what each part does, but why it exists.
+- Use a beginner tone: "assume I have never seen this before."
+- Explain what each import/package is used for in plain language.
+- Explain what would happen without each important import/package.
+- In "Logic and Flow", explicitly cover condition checks, loops, and boolean/comparison usage.
+- In "Functions", explain input -> process -> output for each important function.
+- In "Data Structures", show simple example values and how data changes over time.
+- In "Program Structure", explain where execution starts and how parts connect.
+- In "Debugging and Quality", include 2-3 common beginner mistakes and how to fix them.
+- In "Real-World Reading Path", explain how data flows through variables, arrays/objects, and function calls.
+- In "Example Input and Output", provide concrete sample input and expected output.
+- In "Important Lines Explained", explain key lines only (not every single line).
+- In "Step-by-Step Flow", simulate execution with a small sample and show state changes.
+- In "Beginner Story", use one short real-life analogy (recipe/shopping/etc.) and keep it memorable.
+- In "Deeper Concepts", mention async/promises/recursion/complexity only if actually present.
+- In "Deeper Concepts", keep each concept to 1-2 lines max.
+- Avoid jargon unless you also define it in one sentence.
+- Keep each section concise to avoid overload (roughly 3-7 bullets per section when possible).
 
 Code (${languageId}):
 \`\`\`${languageId}
