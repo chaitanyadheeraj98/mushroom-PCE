@@ -6,10 +6,27 @@ type ModelOption = {
 	detail: string;
 };
 
+type SymbolKind = 'function' | 'variable' | 'import';
+
+type SymbolLocation = {
+	name: string;
+	uri: vscode.Uri;
+	line: number;
+	character: number;
+	kind: SymbolKind;
+};
+
+type SymbolLink = {
+	name: string;
+	kind: SymbolKind;
+	commandUri: string;
+};
+
 export function activate(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
 	const output = vscode.window.createOutputChannel('Mushroom PCE');
 	let lastDocument: vscode.TextDocument | undefined;
+	let lastEditorColumn: vscode.ViewColumn = vscode.ViewColumn.One;
 	let availableModels: vscode.LanguageModelChat[] = [];
 	let selectedModelId: string | undefined;
 
@@ -20,6 +37,9 @@ export function activate(context: vscode.ExtensionContext) {
 
 		if (editor.document.uri.scheme === 'file' || editor.document.uri.scheme === 'untitled') {
 			lastDocument = editor.document;
+			if (editor.viewColumn) {
+				lastEditorColumn = editor.viewColumn;
+			}
 		}
 	};
 
@@ -36,6 +56,20 @@ export function activate(context: vscode.ExtensionContext) {
 		const selectedLabel = selected ? `${selected.name} (${selected.vendor}/${selected.family})` : 'No model selected';
 		const modelLabels = availableModels.map((m) => `${m.name} (${m.vendor}/${m.family})`);
 		panel.setModelInfo(selectedLabel, modelLabels);
+	};
+
+	const applySymbolStateToPanel = (panel: MushroomPanel, document: vscode.TextDocument): void => {
+		const locations = parseSymbolLocations(document);
+		const links: SymbolLink[] = locations.map((loc) => {
+			const args = encodeURIComponent(JSON.stringify([loc.uri.toString(), loc.line, loc.character]));
+			return {
+				name: loc.name,
+				kind: loc.kind,
+				commandUri: `command:mushroom-pce.goToFunction?${args}`
+			};
+		});
+		panel.setSymbolLinks(links);
+		output.appendLine(`symbol links updated: ${links.length}`);
 	};
 
 	const loadModels = async (panel?: MushroomPanel): Promise<void> => {
@@ -67,6 +101,7 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 		lastDocument = document;
+		applySymbolStateToPanel(panel, document);
 
 		const code = document.getText();
 		if (!code.trim()) {
@@ -133,10 +168,46 @@ export function activate(context: vscode.ExtensionContext) {
 
 		panel.setStatus('Ready');
 		panel.setExplanation('Click Analyze to explain the active file.');
+		if (lastDocument) {
+			applySymbolStateToPanel(panel, lastDocument);
+		}
 		await loadModels(panel);
 		output.appendLine('mushroom-pce.start command triggered');
 		await vscode.commands.executeCommand('mushroom-pce.analyzeActive');
 	});
+
+	const goToFunctionCommand = vscode.commands.registerCommand(
+		'mushroom-pce.goToFunction',
+		async (uriString?: string, line?: number, character?: number) => {
+			try {
+				if (typeof uriString !== 'string' || typeof line !== 'number' || typeof character !== 'number') {
+					return;
+				}
+
+				const targetUri = vscode.Uri.parse(uriString);
+				const existingEditor = vscode.window.visibleTextEditors
+					.filter((e) => e.document.uri.toString() === targetUri.toString())
+					.sort((a, b) => (a.viewColumn ?? 999) - (b.viewColumn ?? 999))[0];
+				const document = existingEditor
+					? existingEditor.document
+					: await vscode.workspace.openTextDocument(targetUri);
+				const editor = await vscode.window.showTextDocument(document, {
+					viewColumn: existingEditor?.viewColumn ?? lastEditorColumn ?? vscode.ViewColumn.One,
+					preserveFocus: false,
+					preview: true
+				});
+				const position = new vscode.Position(Math.max(0, line), Math.max(0, character));
+				const selection = new vscode.Selection(position, position);
+				editor.selection = selection;
+				editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+				if (editor.viewColumn) {
+					lastEditorColumn = editor.viewColumn;
+				}
+			} catch (error: any) {
+				vscode.window.showErrorMessage('Could not navigate to function: ' + (error?.message ?? String(error)));
+			}
+		}
+	);
 
 	const selectModelCommand = vscode.commands.registerCommand('mushroom-pce.selectModel', async () => {
 		const panel = MushroomPanel.getCurrentPanel();
@@ -182,9 +253,32 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const onEditorChange = vscode.window.onDidChangeActiveTextEditor((editor) => {
 		rememberEditor(editor);
+		const panel = MushroomPanel.getCurrentPanel();
+		if (panel && !panel.isDisposed() && editor?.document) {
+			applySymbolStateToPanel(panel, editor.document);
+		}
 	});
 
-	context.subscriptions.push(startCommand, analyzeCommand, selectModelCommand, statusBarAnalyze, output, onEditorChange);
+	const onDocumentChange = vscode.workspace.onDidChangeTextDocument((event) => {
+		const panel = MushroomPanel.getCurrentPanel();
+		if (!panel || panel.isDisposed()) {
+			return;
+		}
+		if (lastDocument && event.document.uri.toString() === lastDocument.uri.toString()) {
+			applySymbolStateToPanel(panel, event.document);
+		}
+	});
+
+	context.subscriptions.push(
+		startCommand,
+		analyzeCommand,
+		selectModelCommand,
+		goToFunctionCommand,
+		statusBarAnalyze,
+		output,
+		onEditorChange,
+		onDocumentChange
+	);
 }
 
 async function explainCode(model: vscode.LanguageModelChat, code: string, languageId: string, onChunk?: (chunk: string) => void): Promise<string | undefined> {
@@ -207,6 +301,7 @@ Formatting rules:
 - Use short bullet points.
 - Do not use markdown tables.
 - Use backticks for code identifiers.
+- When referencing a symbol, wrap only the bare identifier in backticks (for example, \`myFunction\`, not \`myFunction(arg)\`).
 - If a section has no items, write: - None
 - Keep explanations simple and visual.
 
@@ -289,6 +384,123 @@ function extractTextFromChunk(chunk: unknown): string {
 	return '';
 }
 
+function parseSymbolLocations(document: vscode.TextDocument): SymbolLocation[] {
+	const locations: SymbolLocation[] = [];
+	const seen = new Set<string>();
+
+	for (let lineIndex = 0; lineIndex < document.lineCount; lineIndex++) {
+		const rawLine = document.lineAt(lineIndex).text;
+		const trimmed = rawLine.trim();
+		if (!trimmed) {
+			continue;
+		}
+
+		const matches: Array<{ name: string; index: number; kind: SymbolKind }> = [];
+
+		const importNamed = /^\s*import\s+(?:type\s+)?\{([^}]+)\}\s+from\b/.exec(rawLine);
+		if (importNamed?.[1]) {
+			for (const part of importNamed[1].split(',')) {
+				const cleaned = part.trim().split(/\s+as\s+/i)[0]?.trim();
+				if (cleaned) {
+					matches.push({ name: cleaned, index: rawLine.indexOf(cleaned), kind: 'import' });
+				}
+			}
+		}
+
+		const importDefault = /^\s*import\s+([A-Za-z_$][\w$]*)\s+from\b/.exec(rawLine);
+		if (importDefault?.[1]) {
+			matches.push({ name: importDefault[1], index: rawLine.indexOf(importDefault[1]), kind: 'import' });
+		}
+
+		const importAlias = /^\s*import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\b/.exec(rawLine);
+		if (importAlias?.[1]) {
+			matches.push({ name: importAlias[1], index: rawLine.indexOf(importAlias[1]), kind: 'import' });
+		}
+
+		const varDecl = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/.exec(rawLine);
+		if (varDecl?.[1]) {
+			matches.push({ name: varDecl[1], index: rawLine.indexOf(varDecl[1]), kind: 'variable' });
+		}
+		const reassignment = /^\s*([A-Za-z_$][\w$]*)\s*=/.exec(rawLine);
+		if (reassignment?.[1] && !['const', 'let', 'var'].includes(reassignment[1])) {
+			matches.push({ name: reassignment[1], index: rawLine.indexOf(reassignment[1]), kind: 'variable' });
+		}
+
+		const fnDecl = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/.exec(rawLine);
+		if (fnDecl?.[1]) {
+			matches.push({ name: fnDecl[1], index: fnDecl.index, kind: 'function' });
+		}
+		for (const param of extractParameterNames(rawLine)) {
+			matches.push({ name: param, index: rawLine.indexOf(param), kind: 'variable' });
+		}
+
+		const arrowFn = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/.exec(rawLine);
+		if (arrowFn?.[1]) {
+			matches.push({ name: arrowFn[1], index: arrowFn.index, kind: 'function' });
+		}
+
+		const classMethod = /^\s*(?:public\s+|private\s+|protected\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/.exec(rawLine);
+		if (classMethod?.[1]) {
+			const disallowed = new Set(['if', 'for', 'while', 'switch', 'catch', 'function', 'constructor']);
+			if (!disallowed.has(classMethod[1])) {
+				matches.push({ name: classMethod[1], index: rawLine.indexOf(classMethod[1]), kind: 'function' });
+			}
+		}
+
+		const pyFn = /^\s*def\s+([A-Za-z_]\w*)\s*\(/.exec(rawLine);
+		if (pyFn?.[1]) {
+			matches.push({ name: pyFn[1], index: rawLine.indexOf(pyFn[1]), kind: 'function' });
+		}
+
+		const goFn = /^\s*func\s+([A-Za-z_]\w*)\s*\(/.exec(rawLine);
+		if (goFn?.[1]) {
+			matches.push({ name: goFn[1], index: rawLine.indexOf(goFn[1]), kind: 'function' });
+		}
+
+		for (const match of matches) {
+			const key = `${match.kind}:${match.name}:${lineIndex}`;
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			locations.push({
+				name: match.name,
+				uri: document.uri,
+				line: lineIndex,
+				character: Math.max(0, match.index),
+				kind: match.kind
+			});
+		}
+	}
+
+	return locations;
+}
+
+function extractParameterNames(line: string): string[] {
+	const matches: string[] = [];
+	const parenMatch = /\(([^)]*)\)/.exec(line);
+	if (!parenMatch?.[1]) {
+		return matches;
+	}
+
+	for (const rawPart of parenMatch[1].split(',')) {
+		const trimmed = rawPart.trim();
+		if (!trimmed) {
+			continue;
+		}
+		const base = trimmed
+			.replace(/^[.\s]*\.{3}/, '')
+			.replace(/[:=].*$/, '')
+			.replace(/[{}\[\]\s]/g, '')
+			.trim();
+		if (/^[A-Za-z_$][\w$]*$/.test(base) && !matches.includes(base)) {
+			matches.push(base);
+		}
+	}
+
+	return matches;
+}
+
 class MushroomPanel {
 	private static currentPanel: MushroomPanel | undefined;
 	private readonly panel: vscode.WebviewPanel;
@@ -299,6 +511,7 @@ class MushroomPanel {
 	private analyzing = false;
 	private currentModel = 'No model selected';
 	private availableModelLabels: string[] = [];
+	private symbolLinks: SymbolLink[] = [];
 
 	static getCurrentPanel(): MushroomPanel | undefined {
 		return MushroomPanel.currentPanel;
@@ -375,6 +588,11 @@ class MushroomPanel {
 		this.render();
 	}
 
+	setSymbolLinks(symbolLinks: SymbolLink[]): void {
+		this.symbolLinks = symbolLinks;
+		this.render();
+	}
+
 	private render(): void {
 		if (this.disposed) {
 			return;
@@ -398,7 +616,7 @@ class MushroomPanel {
 		availableModels: string[]
 	): string {
 		const cspSource = webview.cspSource;
-		const explainHtml = markdownToHtml(text);
+		const explainHtml = markdownToHtml(text, this.symbolLinks);
 		const buttonHtml = analyzing
 			? '<span class="analyze-btn disabled">Analyzing...</span>'
 			: '<a id="analyzeBtn" class="analyze-btn" href="command:mushroom-pce.analyzeActive">Analyze</a>';
@@ -557,6 +775,26 @@ class MushroomPanel {
       font-family: Consolas, "Courier New", monospace;
       font-size: 13px;
     }
+    .content a.symbol-link {
+      text-decoration: none;
+      cursor: pointer;
+      border-bottom: 1px dashed transparent;
+    }
+    .content a.symbol-link code {
+      border-color: transparent;
+    }
+    .content a.symbol-link.symbol-function code {
+      color: #93c5fd;
+    }
+    .content a.symbol-link.symbol-variable code {
+      color: #facc15;
+    }
+    .content a.symbol-link.symbol-import code {
+      color: #a78bfa;
+    }
+    .content a.symbol-link:hover {
+      border-bottom-color: currentColor;
+    }
     .content pre {
       background: var(--code-bg);
       border: 1px solid var(--border);
@@ -610,7 +848,7 @@ class MushroomPanel {
 	}
 }
 
-function markdownToHtml(markdown: string): string {
+function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): string {
 	if (!markdown.trim()) {
 		return '<p>Click Analyze to explain the active file.</p>';
 	}
@@ -648,17 +886,17 @@ function markdownToHtml(markdown: string): string {
 		}
 		if (line.startsWith('### ')) {
 			closeList();
-			out.push(`<h3>${inlineMd(line.slice(4))}</h3>`);
+			out.push(`<h3>${inlineMd(line.slice(4), symbolLinks)}</h3>`);
 			continue;
 		}
 		if (line.startsWith('## ')) {
 			closeList();
-			out.push(`<h2>${inlineMd(line.slice(3))}</h2>`);
+			out.push(`<h2>${inlineMd(line.slice(3), symbolLinks)}</h2>`);
 			continue;
 		}
 		if (line.startsWith('# ')) {
 			closeList();
-			out.push(`<h1>${inlineMd(line.slice(2))}</h1>`);
+			out.push(`<h1>${inlineMd(line.slice(2), symbolLinks)}</h1>`);
 			continue;
 		}
 		if (/^[-*]\s+/.test(line)) {
@@ -667,7 +905,7 @@ function markdownToHtml(markdown: string): string {
 				out.push('<ul>');
 				listMode = 'ul';
 			}
-			out.push(`<li>${inlineMd(line.replace(/^[-*]\s+/, ''))}</li>`);
+			out.push(`<li>${inlineMd(line.replace(/^[-*]\s+/, ''), symbolLinks)}</li>`);
 			continue;
 		}
 		if (/^\d+\.\s+/.test(line)) {
@@ -676,21 +914,146 @@ function markdownToHtml(markdown: string): string {
 				out.push('<ol>');
 				listMode = 'ol';
 			}
-			out.push(`<li>${inlineMd(line.replace(/^\d+\.\s+/, ''))}</li>`);
+			out.push(`<li>${inlineMd(line.replace(/^\d+\.\s+/, ''), symbolLinks)}</li>`);
 			continue;
 		}
 		closeList();
-		out.push(`<p>${inlineMd(line)}</p>`);
+		out.push(`<p>${inlineMd(line, symbolLinks)}</p>`);
 	}
 	closeList();
 	return out.join('') || '<p>No explanation generated.</p>';
 }
 
-function inlineMd(text: string): string {
+function inlineMd(text: string, symbolLinks: SymbolLink[]): string {
 	let result = escapeHtml(text);
-	result = result.replace(/\x60([^\x60]+)\x60/g, '<code>$1</code>');
+	const symbolMap = new Map<string, SymbolLink[]>();
+	for (const symbol of symbolLinks) {
+		const existing = symbolMap.get(symbol.name) ?? [];
+		existing.push(symbol);
+		symbolMap.set(symbol.name, existing);
+	}
+
+	result = result.replace(/#sym:([A-Za-z_$][\w$]*)/g, (_whole, token: string) => {
+		const symbol = resolveSymbolForToken(token, symbolMap);
+		if (!symbol) {
+			return `#sym:${escapeHtml(token)}`;
+		}
+		return `<a class="symbol-link symbol-${symbol.kind}" href="${symbol.commandUri}" title="Go to ${escapeHtml(token)}"><code>${escapeHtml(token)}</code></a>`;
+	});
+
+	result = result.replace(/\x60([^\x60]+)\x60/g, (_whole, token: string) => {
+		const clean = token.trim();
+		const symbol = resolveSymbolForToken(clean, symbolMap);
+		const codeTag = `<code>${escapeHtml(clean)}</code>`;
+		if (!symbol) {
+			return codeTag;
+		}
+		return `<a class="symbol-link symbol-${symbol.kind}" href="${symbol.commandUri}" title="Go to ${escapeHtml(clean)}">${codeTag}</a>`;
+	});
 	result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+	result = linkPlainSymbolsInHtml(result, symbolLinks);
 	return result;
+}
+
+function resolveSymbolForToken(token: string, symbolMap: Map<string, SymbolLink[]>): SymbolLink | undefined {
+	const candidates = extractTokenCandidates(token);
+	for (const candidate of candidates) {
+		const direct = pickPreferredSymbol(symbolMap.get(candidate));
+		if (direct) {
+			return direct;
+		}
+	}
+
+	const lower = token.toLowerCase();
+	for (const [name, symbols] of symbolMap.entries()) {
+		if (name.toLowerCase() === lower) {
+			return pickPreferredSymbol(symbols);
+		}
+	}
+
+	return undefined;
+}
+
+function extractTokenCandidates(token: string): string[] {
+	const out: string[] = [];
+	const add = (value: string) => {
+		const v = value.trim();
+		if (v && !out.includes(v)) {
+			out.push(v);
+		}
+	};
+
+	add(token);
+	add(token.replace(/^[^\w$]+|[^\w$]+$/g, ''));
+
+	const identifierMatches = token.match(/[A-Za-z_$][\w$]*/g) ?? [];
+	for (const id of identifierMatches) {
+		add(id);
+	}
+
+	if (token.includes('.')) {
+		for (const part of token.split('.')) {
+			add(part);
+		}
+	}
+
+	return out;
+}
+
+function pickPreferredSymbol(symbols: SymbolLink[] | undefined): SymbolLink | undefined {
+	if (!symbols || symbols.length === 0) {
+		return undefined;
+	}
+	const order: Record<SymbolKind, number> = {
+		function: 0,
+		variable: 1,
+		import: 2
+	};
+	return [...symbols].sort((a, b) => order[a.kind] - order[b.kind])[0];
+}
+
+function linkPlainSymbolsInHtml(html: string, symbolLinks: SymbolLink[]): string {
+	if (!html || !symbolLinks.length) {
+		return html;
+	}
+
+	const symbolMap = new Map<string, SymbolLink>();
+	for (const symbol of symbolLinks) {
+		if (!symbolMap.has(symbol.name)) {
+			symbolMap.set(symbol.name, symbol);
+		}
+	}
+
+	const names = [...symbolMap.keys()]
+		.filter((name) => name.length >= 2)
+		.sort((a, b) => b.length - a.length);
+	if (!names.length) {
+		return html;
+	}
+
+	const escapedNames = names.map(escapeRegExp);
+	const pattern = new RegExp(`\\b(${escapedNames.join('|')})\\b`, 'g');
+
+	return html
+		.split(/(<[^>]+>)/g)
+		.map((part) => {
+			if (!part || part.startsWith('<')) {
+				return part;
+			}
+
+			return part.replace(pattern, (match: string) => {
+				const symbol = symbolMap.get(match);
+				if (!symbol) {
+					return match;
+				}
+				return `<a class="symbol-link symbol-${symbol.kind}" href="${symbol.commandUri}" title="Go to ${escapeHtml(match)}"><code>${escapeHtml(match)}</code></a>`;
+			});
+		})
+		.join('');
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function escapeHtml(value: string): string {

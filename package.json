@@ -2,7 +2,7 @@
   "name": "mushroom-pce",
   "displayName": "mushroom-PCE",
   "description": "AI Prompt Constraint Engine for structured and controlled code generation inside VS Code.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "engines": {
     "vscode": "^1.110.0"
   },
@@ -12,7 +12,8 @@
   "activationEvents": [
     "onCommand:mushroom-pce.start",
     "onCommand:mushroom-pce.analyzeActive",
-    "onCommand:mushroom-pce.selectModel"
+    "onCommand:mushroom-pce.selectModel",
+    "onCommand:mushroom-pce.goToFunction"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -28,6 +29,10 @@
       {
         "command": "mushroom-pce.selectModel",
         "title": "Mushroom PCE: Select Model"
+      },
+      {
+        "command": "mushroom-pce.goToFunction",
+        "title": "Mushroom PCE: Go To Function"
       }
     ]
   },
