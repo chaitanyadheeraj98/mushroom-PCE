@@ -1,9 +1,17 @@
 import * as vscode from 'vscode';
 
+type ModelOption = {
+	id: string;
+	label: string;
+	detail: string;
+};
+
 export function activate(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
 	const output = vscode.window.createOutputChannel('Mushroom PCE');
 	let lastDocument: vscode.TextDocument | undefined;
+	let availableModels: vscode.LanguageModelChat[] = [];
+	let selectedModelId: string | undefined;
 
 	const rememberEditor = (editor: vscode.TextEditor | undefined): void => {
 		if (!editor) {
@@ -16,6 +24,31 @@ export function activate(context: vscode.ExtensionContext) {
 	};
 
 	rememberEditor(vscode.window.activeTextEditor);
+
+	const formatModelOption = (model: vscode.LanguageModelChat): ModelOption => ({
+		id: model.id,
+		label: model.name,
+		detail: `${model.vendor} / ${model.family} / ${model.version}`
+	});
+
+	const applyModelStateToPanel = (panel: MushroomPanel): void => {
+		const selected = availableModels.find((m) => m.id === selectedModelId);
+		const selectedLabel = selected ? `${selected.name} (${selected.vendor}/${selected.family})` : 'No model selected';
+		const modelLabels = availableModels.map((m) => `${m.name} (${m.vendor}/${m.family})`);
+		panel.setModelInfo(selectedLabel, modelLabels);
+	};
+
+	const loadModels = async (panel?: MushroomPanel): Promise<void> => {
+		availableModels = await vscode.lm.selectChatModels();
+		if (!selectedModelId || !availableModels.some((m) => m.id === selectedModelId)) {
+			selectedModelId = availableModels[0]?.id;
+		}
+
+		if (panel && !panel.isDisposed()) {
+			applyModelStateToPanel(panel);
+		}
+		output.appendLine(`models loaded: ${availableModels.length}`);
+	};
 
 	const runAnalysis = async (panel: MushroomPanel): Promise<void> => {
 		output.appendLine('runAnalysis invoked');
@@ -50,8 +83,19 @@ export function activate(context: vscode.ExtensionContext) {
 		panel.setStatus('Analyzing...');
 		output.appendLine(`Analyzing language=${document.languageId}, chars=${code.length}`);
 
+		await loadModels(panel);
+		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+		if (!model) {
+			panel.setAnalyzing(false);
+			panel.setStatus('No model available');
+			panel.setExplanation('No AI model is currently available. Open Copilot/Chat model access and try again.');
+			output.appendLine('runAnalysis aborted: no model available');
+			return;
+		}
+		output.appendLine(`using model id=${model.id}`);
+
 		let streamed = false;
-		const explanation = await explainCode(code, document.languageId, (chunk) => {
+		const explanation = await explainCode(model, code, document.languageId, (chunk) => {
 			if (runId !== latestRunId || panel.isDisposed()) {
 				return;
 			}
@@ -89,8 +133,45 @@ export function activate(context: vscode.ExtensionContext) {
 
 		panel.setStatus('Ready');
 		panel.setExplanation('Click Analyze to explain the active file.');
+		await loadModels(panel);
 		output.appendLine('mushroom-pce.start command triggered');
 		await vscode.commands.executeCommand('mushroom-pce.analyzeActive');
+	});
+
+	const selectModelCommand = vscode.commands.registerCommand('mushroom-pce.selectModel', async () => {
+		const panel = MushroomPanel.getCurrentPanel();
+		await loadModels(panel);
+
+		if (!availableModels.length) {
+			vscode.window.showErrorMessage('No AI models available to select.');
+			return;
+		}
+
+		const pickItems = availableModels.map((model) => {
+			const option = formatModelOption(model);
+			return {
+				label: option.label,
+				description: model.id === selectedModelId ? 'Current' : '',
+				detail: option.detail,
+				modelId: model.id
+			};
+		});
+
+		const picked = await vscode.window.showQuickPick(pickItems, {
+			title: 'Mushroom PCE: Select AI Model',
+			placeHolder: 'Choose the model used for code explanation'
+		});
+
+		if (!picked) {
+			return;
+		}
+
+		selectedModelId = picked.modelId;
+		if (panel && !panel.isDisposed()) {
+			applyModelStateToPanel(panel);
+		}
+		vscode.window.showInformationMessage(`Mushroom PCE model set to: ${picked.label}`);
+		output.appendLine(`model selected: ${picked.modelId}`);
 	});
 	
 	const statusBarAnalyze = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -103,20 +184,11 @@ export function activate(context: vscode.ExtensionContext) {
 		rememberEditor(editor);
 	});
 
-	context.subscriptions.push(startCommand, analyzeCommand, statusBarAnalyze, output, onEditorChange);
+	context.subscriptions.push(startCommand, analyzeCommand, selectModelCommand, statusBarAnalyze, output, onEditorChange);
 }
 
-async function explainCode(code: string, languageId: string, onChunk?: (chunk: string) => void): Promise<string | undefined> {
+async function explainCode(model: vscode.LanguageModelChat, code: string, languageId: string, onChunk?: (chunk: string) => void): Promise<string | undefined> {
 	try {
-		const models = await vscode.lm.selectChatModels();
-
-		if (!models.length) {
-			vscode.window.showErrorMessage('No AI model available.');
-			return;
-		}
-
-		const model = models[0];
-
 		const prompt = `
 You are a friendly programming teacher for beginners.
 
@@ -225,6 +297,8 @@ class MushroomPanel {
 	private status = 'Ready';
 	private rawText = 'Click Analyze to explain the active file.';
 	private analyzing = false;
+	private currentModel = 'No model selected';
+	private availableModelLabels: string[] = [];
 
 	static getCurrentPanel(): MushroomPanel | undefined {
 		return MushroomPanel.currentPanel;
@@ -295,19 +369,42 @@ class MushroomPanel {
 		this.render();
 	}
 
+	setModelInfo(currentModel: string, availableModels: string[]): void {
+		this.currentModel = currentModel;
+		this.availableModelLabels = availableModels;
+		this.render();
+	}
+
 	private render(): void {
 		if (this.disposed) {
 			return;
 		}
-		this.panel.webview.html = this.getHtml(this.panel.webview, this.status, this.rawText, this.analyzing);
+		this.panel.webview.html = this.getHtml(
+			this.panel.webview,
+			this.status,
+			this.rawText,
+			this.analyzing,
+			this.currentModel,
+			this.availableModelLabels
+		);
 	}
 
-	private getHtml(webview: vscode.Webview, status: string, text: string, analyzing: boolean): string {
+	private getHtml(
+		webview: vscode.Webview,
+		status: string,
+		text: string,
+		analyzing: boolean,
+		currentModel: string,
+		availableModels: string[]
+	): string {
 		const cspSource = webview.cspSource;
 		const explainHtml = markdownToHtml(text);
 		const buttonHtml = analyzing
 			? '<span class="analyze-btn disabled">Analyzing...</span>'
 			: '<a id="analyzeBtn" class="analyze-btn" href="command:mushroom-pce.analyzeActive">Analyze</a>';
+		const modelListHtml = availableModels.length
+			? `<ul class="model-list">${availableModels.map((model) => `<li>${escapeHtml(model)}</li>`).join('')}</ul>`
+			: '<div class="hint">No models found</div>';
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -366,6 +463,36 @@ class MushroomPanel {
       display: flex;
       gap: 8px;
       align-items: center;
+    }
+    .model-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: color-mix(in oklab, var(--panel) 85%, black);
+    }
+    .model-title {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .model-current {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .model-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .model-list {
+      margin: 4px 0 0 16px;
+      padding: 0;
+      font-size: 12px;
+      color: var(--muted);
+      max-height: 90px;
+      overflow-y: auto;
     }
     .analyze-btn {
       display: inline-block;
@@ -462,6 +589,14 @@ class MushroomPanel {
     <div class="header">
       <div class="title"><span class="dot"></span>Mushroom PCE</div>
       <div class="status">${escapeHtml(status)}</div>
+    </div>
+    <div class="model-card">
+      <div class="model-title">Model In Use</div>
+      <div class="model-current">${escapeHtml(currentModel)}</div>
+      <div class="model-actions">
+        <a class="fallback-link" href="command:mushroom-pce.selectModel">Select Model</a>
+      </div>
+      ${modelListHtml}
     </div>
     <div class="toolbar">
       ${buttonHtml}
