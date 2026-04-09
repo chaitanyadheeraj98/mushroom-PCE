@@ -1,45 +1,51 @@
+import * as ts from 'typescript';
 import * as vscode from 'vscode';
 
-import { parseSymbolLocations } from '../symbols';
 import { CircuitEdge, CircuitGraph, CircuitNode, CircuitPort } from './types';
 
-type FnRange = { startLine: number; endLine: number };
-type FnSymbol = { name: string; line: number; character: number };
+type FunctionInfo = {
+	id: string;
+	name: string;
+	node:
+		| ts.FunctionDeclaration
+		| ts.MethodDeclaration
+		| ts.ArrowFunction
+		| ts.FunctionExpression;
+	line: number;
+	character: number;
+	params: string[];
+	signals: string[];
+};
 
-// Function-only graph:
-// - One node per function/method
-// - Purple input ports = params
-// - Green output ports = return / side effects
-// - Edges only between linked functions/sinks (calls and basic composition)
+type ScopeState = Map<string, string[]>;
+
 export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 	const code = document.getText();
-	const lines = code.replace(/\r\n/g, '\n').split('\n');
 	const uri = document.uri.toString();
+	const sourceFile = ts.createSourceFile(
+		document.fileName || inferFileName(document.languageId),
+		code,
+		ts.ScriptTarget.Latest,
+		true,
+		inferScriptKind(document.languageId)
+	);
 
-	const symbols = parseSymbolLocations(document)
-		.filter((s) => s.kind === 'function')
-		.map((s): FnSymbol => ({ name: s.name, line: s.line, character: s.character }));
-
-	const functionNames = [...new Set(symbols.map((s) => s.name))];
-	const ranges = computeFunctionRanges(lines, functionNames);
-
+	const functions = collectFunctions(sourceFile);
+	const functionByName = new Map(functions.map((fn) => [fn.name, fn] as const));
 	const nodeById = new Map<string, CircuitNode>();
+	const edges: CircuitEdge[] = [];
+	const edgeKey = new Set<string>();
+	let consoleSinkCreated = false;
 
-	const addFunctionNode = (fnName: string): CircuitNode => {
-		const id = `function:${fnName}`;
-		const existing = nodeById.get(id);
+	const addFunctionNode = (fn: FunctionInfo): CircuitNode => {
+		const existing = nodeById.get(fn.id);
 		if (existing) {
 			return existing;
 		}
 
-		const sym = symbols.find((s) => s.name === fnName);
-		const range = ranges.get(fnName);
-		const signature = range ? (lines[range.startLine] ?? '') : '';
-		const params = range ? extractParameterNames(signature) : [];
-
-		const inputs: CircuitPort[] = params.map((p) => ({
-			id: `in:${fnName}:${p}`,
-			name: p,
+		const inputs: CircuitPort[] = fn.params.map((param) => ({
+			id: `in:${fn.name}:${param}`,
+			name: param,
 			direction: 'in',
 			kind: 'param',
 			detail: 'parameter'
@@ -47,7 +53,7 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 
 		const outputs: CircuitPort[] = [
 			{
-				id: `out:${fnName}:return`,
+				id: `out:${fn.name}:return`,
 				name: 'return',
 				direction: 'out',
 				kind: 'return',
@@ -55,211 +61,404 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 			}
 		];
 
+		const detail = ['function', ...fn.signals].join(' | ');
 		const node: CircuitNode = {
-			id,
+			id: fn.id,
 			type: 'function',
-			label: fnName,
+			label: fn.name,
 			uri,
-			detail: 'function',
-			line: sym?.line,
-			character: sym?.character,
+			detail,
+			line: fn.line,
+			character: fn.character,
 			inputs,
 			outputs
 		};
-		nodeById.set(id, node);
+		nodeById.set(fn.id, node);
 		return node;
 	};
 
-	const addSinkNode = (label: string, detail: string, line?: number): CircuitNode => {
+	const addSinkNode = (label: string, line?: number): CircuitNode => {
 		const id = `sink:${label}`;
 		const existing = nodeById.get(id);
 		if (existing) {
 			return existing;
 		}
+
 		const node: CircuitNode = {
 			id,
 			type: 'sink',
 			label,
 			uri,
-			detail,
+			detail: 'output sink',
 			line,
 			character: 0,
-			inputs: [{ id: `in:${label}:value`, name: 'value', direction: 'in', kind: 'sideEffect', detail: 'incoming value' }],
+			inputs: [
+				{
+					id: `in:${label}:value`,
+					name: 'value',
+					direction: 'in',
+					kind: 'sideEffect',
+					detail: 'incoming value'
+				}
+			],
 			outputs: []
 		};
 		nodeById.set(id, node);
 		return node;
 	};
 
-	for (const name of functionNames) {
-		addFunctionNode(name);
-	}
-
-	const edges: CircuitEdge[] = [];
-	const edgeKey = new Set<string>();
 	const addEdge = (from: string, to: string, fromPort?: string, toPort?: string, label?: string): void => {
 		if (!nodeById.has(from) || !nodeById.has(to) || from === to) {
 			return;
 		}
+
 		const key = `${from}:${fromPort ?? ''}->${to}:${toPort ?? ''}:${label ?? ''}`;
 		if (edgeKey.has(key)) {
 			return;
 		}
+
 		edgeKey.add(key);
 		edges.push({ id: `e:${edges.length}`, from, to, fromPort, toPort, label });
 	};
 
-	// 1) Calls between functions.
-	for (const fnName of functionNames) {
-		const range = ranges.get(fnName);
-		const body = range ? lines.slice(range.startLine, range.endLine + 1).join('\n') : code;
-		const fromId = `function:${fnName}`;
-
-		for (const called of functionNames) {
-			if (called === fnName) {
-				continue;
-			}
-			if (new RegExp(`\\b${escapeRegExp(called)}\\s*\\(`).test(body)) {
-				addEdge(fromId, `function:${called}`, `out:${fnName}:return`, undefined, 'calls');
-			}
-		}
+	for (const fn of functions) {
+		addFunctionNode(fn);
 	}
 
-	// 2) console.log(fn(...)) -> sink
-	const consoleLines = lines
-		.map((t, idx) => ({ t, idx }))
-		.filter((x) => /\bconsole\.log\s*\(/.test(x.t));
-	if (consoleLines.length) {
-		const sink = addSinkNode('console.log', 'console output', consoleLines[0].idx);
-		const sinkIn = sink.inputs?.[0]?.id;
-		for (const fnName of functionNames) {
-			const re = new RegExp(`\\bconsole\\.log\\s*\\([^\\)]*\\b${escapeRegExp(fnName)}\\s*\\(`);
-			if (re.test(code)) {
-				addEdge(`function:${fnName}`, sink.id, `out:${fnName}:return`, sinkIn, 'output');
-			}
+	for (const fn of functions) {
+		const fnScope = new Map<string, string[]>();
+		for (const param of fn.params) {
+			fnScope.set(param, []);
 		}
+		analyzeNode(fn.node.body, fn, fnScope, functionByName, nodeById, addSinkNode, addEdge, () => {
+			consoleSinkCreated = true;
+		});
 	}
 
-	// 3) bar(foo(x)) => foo return feeds bar param[0]
-	for (const raw of lines) {
-		for (const outer of functionNames) {
-			const outerCall = new RegExp(`\\b${escapeRegExp(outer)}\\s*\\((.*)\\)`);
-			const m = outerCall.exec(raw);
-			if (!m?.[1]) {
-				continue;
-			}
-			for (const inner of functionNames) {
-				if (inner === outer) {
-					continue;
-				}
-				if (new RegExp(`\\b${escapeRegExp(inner)}\\s*\\(`).test(m[1])) {
-					const outerNode = nodeById.get(`function:${outer}`);
-					const toPort = outerNode?.inputs?.[0]?.id;
-					addEdge(`function:${inner}`, `function:${outer}`, `out:${inner}:return`, toPort, 'feeds');
-				}
-			}
+	const topLevelScope = new Map<string, string[]>();
+	for (const statement of sourceFile.statements) {
+		if (isFunctionHostStatement(statement)) {
+			continue;
 		}
+		analyzeNode(statement, undefined, topLevelScope, functionByName, nodeById, addSinkNode, addEdge, () => {
+			consoleSinkCreated = true;
+		});
 	}
 
-	// 4) const t = foo(...); bar(t);
-	const tempValueMap = new Map<string, string>(); // tempVar -> producerFn
-	for (const raw of lines) {
-		const assign = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\(/.exec(raw);
-		if (assign?.[1] && assign?.[2] && functionNames.includes(assign[2])) {
-			tempValueMap.set(assign[1], assign[2]);
-		}
-
-		for (const consumer of functionNames) {
-			const call = new RegExp(`\\b${escapeRegExp(consumer)}\\s*\\(([^\\)]*)\\)`);
-			const m = call.exec(raw);
-			if (!m?.[1]) {
-				continue;
-			}
-			for (const [tempVar, producerFn] of tempValueMap.entries()) {
-				if (new RegExp(`\\b${escapeRegExp(tempVar)}\\b`).test(m[1])) {
-					const consumerNode = nodeById.get(`function:${consumer}`);
-					const toPort = consumerNode?.inputs?.[0]?.id;
-					addEdge(`function:${producerFn}`, `function:${consumer}`, `out:${producerFn}:return`, toPort, tempVar);
-				}
-			}
-		}
+	if (!consoleSinkCreated) {
+		nodeById.delete('sink:console.log');
 	}
 
 	return { nodes: [...nodeById.values()], edges };
 }
 
-function computeFunctionRanges(lines: string[], functionNames: string[]): Map<string, FnRange> {
-	const ranges = new Map<string, FnRange>();
-	const fnRegexes = functionNames.map((name) => ({
-		name,
-		re: new RegExp(
-			`\\bfunction\\s+${escapeRegExp(name)}\\b|\\b${escapeRegExp(name)}\\s*=\\s*(?:async\\s*)?\\([^)]*\\)\\s*=>|\\b${escapeRegExp(
-				name
-			)}\\s*\\([^)]*\\)\\s*\\{`
-		)
-	}));
+function collectFunctions(sourceFile: ts.SourceFile): FunctionInfo[] {
+	const functions: FunctionInfo[] = [];
 
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		for (const { name, re } of fnRegexes) {
-			if (ranges.has(name)) {
-				continue;
-			}
-			if (!re.test(line)) {
-				continue;
-			}
-			const end = findBlockEnd(lines, i);
-			ranges.set(name, { startLine: i, endLine: end ?? i });
-		}
-	}
-
-	return ranges;
-}
-
-function findBlockEnd(lines: string[], startLine: number): number | undefined {
-	let depth = 0;
-	let started = false;
-	for (let i = startLine; i < lines.length; i++) {
-		for (const ch of lines[i]) {
-			if (ch === '{') {
-				depth++;
-				started = true;
-			} else if (ch === '}') {
-				depth--;
-				if (started && depth <= 0) {
-					return i;
+	const visit = (node: ts.Node, className?: string) => {
+		if (ts.isFunctionDeclaration(node) && node.name && node.body) {
+			functions.push(createFunctionInfo(node.name.text, node, sourceFile));
+		} else if (ts.isVariableStatement(node)) {
+			for (const declaration of node.declarationList.declarations) {
+				if (!ts.isIdentifier(declaration.name) || !declaration.initializer) {
+					continue;
+				}
+				if (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer)) {
+					functions.push(createFunctionInfo(declaration.name.text, declaration.initializer, sourceFile, declaration.name));
 				}
 			}
+		} else if (ts.isClassDeclaration(node)) {
+			const nextClass = node.name?.text ?? className;
+			ts.forEachChild(node, (child) => visit(child, nextClass));
+			return;
+		} else if (ts.isMethodDeclaration(node) && node.body) {
+			const methodName = getPropertyName(node.name);
+			if (methodName) {
+				const label = className ? `${className}.${methodName}` : methodName;
+				functions.push(createFunctionInfo(label, node, sourceFile, node.name));
+			}
 		}
+
+		ts.forEachChild(node, (child) => visit(child, className));
+	};
+
+	visit(sourceFile);
+	return dedupeFunctions(functions);
+}
+
+function createFunctionInfo(
+	name: string,
+	node: ts.FunctionDeclaration | ts.MethodDeclaration | ts.ArrowFunction | ts.FunctionExpression,
+	sourceFile: ts.SourceFile,
+	nameNode?: ts.Node
+): FunctionInfo {
+	const start = nameNode ?? node;
+	const position = sourceFile.getLineAndCharacterOfPosition(start.getStart(sourceFile));
+	return {
+		id: `function:${name}`,
+		name,
+		node,
+		line: position.line,
+		character: position.character,
+		params: node.parameters.map((param) => getBindingNames(param.name)).flat(),
+		signals: collectFunctionSignals(node)
+	};
+}
+
+function dedupeFunctions(functions: FunctionInfo[]): FunctionInfo[] {
+	const seen = new Set<string>();
+	return functions.filter((fn) => {
+		if (seen.has(fn.id)) {
+			return false;
+		}
+		seen.add(fn.id);
+		return true;
+	});
+}
+
+function collectFunctionSignals(node: FunctionInfo['node']): string[] {
+	const signals = new Set<string>();
+	ts.forEachChild(node.body ?? node, function visit(child) {
+		if (ts.isIfStatement(child)) {
+			signals.add('if');
+		}
+		if (ts.isForStatement(child) || ts.isForInStatement(child) || ts.isForOfStatement(child) || ts.isWhileStatement(child) || ts.isDoStatement(child)) {
+			signals.add('loop');
+		}
+		if (ts.isAwaitExpression(child)) {
+			signals.add('async');
+		}
+		if (ts.isTryStatement(child) || ts.isThrowStatement(child)) {
+			signals.add('error-path');
+		}
+		ts.forEachChild(child, visit);
+	});
+	return [...signals];
+}
+
+function analyzeNode(
+	node: ts.Node | undefined,
+	currentFn: FunctionInfo | undefined,
+	scope: ScopeState,
+	functionByName: Map<string, FunctionInfo>,
+	nodeById: Map<string, CircuitNode>,
+	addSinkNode: (label: string, line?: number) => CircuitNode,
+	addEdge: (from: string, to: string, fromPort?: string, toPort?: string, label?: string) => void,
+	markConsoleUsed: () => void
+): void {
+	if (!node) {
+		return;
+	}
+
+	const visit = (child: ts.Node, localScope: ScopeState) => {
+		if (ts.isVariableDeclaration(child) && ts.isIdentifier(child.name) && child.initializer) {
+			const producers = resolveProducers(child.initializer, localScope, functionByName);
+			if (producers.length) {
+				localScope.set(child.name.text, producers);
+			}
+			visitExpressions(child.initializer, localScope);
+			return;
+		}
+
+		if (ts.isBinaryExpression(child) && child.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(child.left)) {
+			const producers = resolveProducers(child.right, localScope, functionByName);
+			if (producers.length) {
+				localScope.set(child.left.text, producers);
+			}
+			visitExpressions(child.right, localScope);
+			return;
+		}
+
+		if (ts.isCallExpression(child)) {
+			handleCallExpression(child, currentFn, localScope, functionByName, nodeById, addSinkNode, addEdge, markConsoleUsed);
+			for (const arg of child.arguments) {
+				visitExpressions(arg, localScope);
+			}
+			return;
+		}
+
+		if (ts.isReturnStatement(child) && child.expression) {
+			visitExpressions(child.expression, localScope);
+			return;
+		}
+
+		if (ts.isBlock(child)) {
+			const nestedScope = new Map(localScope);
+			for (const stmt of child.statements) {
+				visit(stmt, nestedScope);
+			}
+			return;
+		}
+
+		ts.forEachChild(child, (next) => visit(next, localScope));
+	};
+
+	const visitExpressions = (expr: ts.Expression, localScope: ScopeState) => {
+		ts.forEachChild(expr, (child) => visit(child, localScope));
+	};
+
+	visit(node, scope);
+}
+
+function handleCallExpression(
+	call: ts.CallExpression,
+	currentFn: FunctionInfo | undefined,
+	scope: ScopeState,
+	functionByName: Map<string, FunctionInfo>,
+	nodeById: Map<string, CircuitNode>,
+	addSinkNode: (label: string, line?: number) => CircuitNode,
+	addEdge: (from: string, to: string, fromPort?: string, toPort?: string, label?: string) => void,
+	markConsoleUsed: () => void
+): void {
+	const calleeName = getCallTargetName(call.expression);
+	if (!calleeName) {
+		return;
+	}
+
+	if (calleeName === 'console.log') {
+		markConsoleUsed();
+		const sink = addSinkNode('console.log', getNodeLine(call));
+		const sinkInput = sink.inputs?.[0]?.id;
+		for (const arg of call.arguments) {
+			for (const producer of resolveProducers(arg, scope, functionByName)) {
+				addEdge(`function:${producer}`, sink.id, `out:${producer}:return`, sinkInput, 'output');
+			}
+		}
+		return;
+	}
+
+	const called = functionByName.get(calleeName);
+	if (!called) {
+		return;
+	}
+
+	const consumerNode = nodeById.get(called.id);
+	let linked = false;
+
+	call.arguments.forEach((arg, index) => {
+		const toPort = consumerNode?.inputs?.[index]?.id ?? consumerNode?.inputs?.[0]?.id;
+		for (const producer of resolveProducers(arg, scope, functionByName)) {
+			addEdge(`function:${producer}`, called.id, `out:${producer}:return`, toPort, toPort ? consumerNode?.inputs?.[index]?.name ?? 'feeds' : 'feeds');
+			linked = true;
+		}
+	});
+
+	if (!linked && currentFn && currentFn.id !== called.id) {
+		addEdge(currentFn.id, called.id, undefined, consumerNode?.inputs?.[0]?.id, 'calls');
+	}
+}
+
+function resolveProducers(expression: ts.Expression, scope: ScopeState, functionByName: Map<string, FunctionInfo>): string[] {
+	if (
+		ts.isParenthesizedExpression(expression) ||
+		ts.isAsExpression(expression) ||
+		ts.isTypeAssertionExpression(expression) ||
+		ts.isNonNullExpression(expression)
+	) {
+		return resolveProducers(expression.expression, scope, functionByName);
+	}
+
+	if (ts.isAwaitExpression(expression)) {
+		return resolveProducers(expression.expression, scope, functionByName);
+	}
+
+	if (ts.isConditionalExpression(expression)) {
+		return uniq([
+			...resolveProducers(expression.whenTrue, scope, functionByName),
+			...resolveProducers(expression.whenFalse, scope, functionByName)
+		]);
+	}
+
+	if (ts.isCallExpression(expression)) {
+		const callee = getCallTargetName(expression.expression);
+		return callee && functionByName.has(callee) ? [callee] : [];
+	}
+
+	if (ts.isIdentifier(expression)) {
+		return scope.get(expression.text) ?? [];
+	}
+
+	return [];
+}
+
+function getCallTargetName(expression: ts.Expression): string | undefined {
+	if (ts.isIdentifier(expression)) {
+		return expression.text;
+	}
+	if (ts.isPropertyAccessExpression(expression)) {
+		const base = ts.isIdentifier(expression.expression) ? expression.expression.text : expression.expression.getText();
+		return `${base}.${expression.name.text}`;
 	}
 	return undefined;
 }
 
-function extractParameterNames(line: string): string[] {
-	const matches: string[] = [];
-	const parenMatch = /\(([^)]*)\)/.exec(line);
-	if (!parenMatch?.[1]) {
-		return matches;
+function getPropertyName(name: ts.PropertyName): string | undefined {
+	if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+		return name.text;
 	}
-
-	for (const rawPart of parenMatch[1].split(',')) {
-		const trimmed = rawPart.trim();
-		if (!trimmed) {
-			continue;
-		}
-		const base = trimmed
-			.replace(/^[.\s]*\.{3}/, '')
-			.replace(/[:=].*$/, '')
-			.replace(/[{}\[\]\s]/g, '')
-			.trim();
-		if (/^[A-Za-z_$][\w$]*$/.test(base) && !matches.includes(base)) {
-			matches.push(base);
-		}
-	}
-
-	return matches;
+	return undefined;
 }
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function getBindingNames(name: ts.BindingName): string[] {
+	if (ts.isIdentifier(name)) {
+		return [name.text];
+	}
+	const names: string[] = [];
+	for (const element of name.elements) {
+		if (ts.isBindingElement(element)) {
+			names.push(...getBindingNames(element.name));
+		}
+	}
+	return names;
+}
+
+function getNodeLine(node: ts.Node): number {
+	const sourceFile = node.getSourceFile();
+	return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line;
+}
+
+function isFunctionHostStatement(statement: ts.Statement): boolean {
+	if (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) {
+		return true;
+	}
+	if (!ts.isVariableStatement(statement)) {
+		return false;
+	}
+
+	return statement.declarationList.declarations.some(
+		(declaration) =>
+			ts.isIdentifier(declaration.name) &&
+			!!declaration.initializer &&
+			(ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
+	);
+}
+
+function inferScriptKind(languageId: string): ts.ScriptKind {
+	switch (languageId) {
+		case 'javascript':
+			return ts.ScriptKind.JS;
+		case 'javascriptreact':
+			return ts.ScriptKind.JSX;
+		case 'typescriptreact':
+			return ts.ScriptKind.TSX;
+		default:
+			return ts.ScriptKind.TS;
+	}
+}
+
+function inferFileName(languageId: string): string {
+	switch (languageId) {
+		case 'javascript':
+			return 'file.js';
+		case 'javascriptreact':
+			return 'file.jsx';
+		case 'typescriptreact':
+			return 'file.tsx';
+		default:
+			return 'file.ts';
+	}
+}
+
+function uniq(values: string[]): string[] {
+	return [...new Set(values)];
 }
