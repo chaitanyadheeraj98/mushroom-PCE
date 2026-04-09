@@ -747,11 +747,33 @@ export class CircuitPanel {
 
     function showPortTip(x, y, info) {
       if (!portTip) return;
-      portTip.innerHTML =
-        '<div><span class="k">Port:</span> <span class="v">' + escape(info.name) + '</span></div>' +
-        '<div><span class="k">Direction:</span> <span class="v">' + escape(info.dir) + '</span></div>' +
-        '<div><span class="k">Kind:</span> <span class="v">' + escape(info.kind) + '</span></div>' +
-        (info.det ? '<div class="k" style="margin-top:6px;">' + escape(info.det) + '</div>' : '');
+      // Build DOM instead of using innerHTML to avoid HTML-parser edge cases in webviews.
+      portTip.textContent = '';
+
+      const addRow = (label, value) => {
+        const row = document.createElement('div');
+        const k = document.createElement('span');
+        k.className = 'k';
+        k.textContent = label + ': ';
+        const v = document.createElement('span');
+        v.className = 'v';
+        v.textContent = String(value ?? '');
+        row.appendChild(k);
+        row.appendChild(v);
+        portTip.appendChild(row);
+      };
+
+      addRow('Port', info.name);
+      addRow('Direction', info.dir);
+      addRow('Kind', info.kind);
+
+      if (info.det) {
+        const detDiv = document.createElement('div');
+        detDiv.className = 'k';
+        detDiv.style.marginTop = '6px';
+        detDiv.textContent = String(info.det);
+        portTip.appendChild(detDiv);
+      }
       const pad = 14;
       portTip.style.left = Math.max(pad, x + 12) + 'px';
       portTip.style.top = Math.max(pad, y + 12) + 'px';
@@ -763,14 +785,7 @@ export class CircuitPanel {
       portTip.classList.remove('show');
     }
 
-    function escape(s) {
-      return String(s || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
+    // No HTML escaping needed because we use textContent for tooltip content.
 
     function animate() {
       requestAnimationFrame(animate);
