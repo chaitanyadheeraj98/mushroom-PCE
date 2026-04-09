@@ -112,6 +112,26 @@ export class CircuitPanel {
     .muted { color: #9fb0cc; font-size: 12px; }
     #details { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; color: #cbd5e1; }
     #canvas { display: block; width: 100%; height: 100%; }
+    #portTip {
+      position: absolute;
+      min-width: 140px;
+      max-width: 320px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(33, 48, 77, 0.95);
+      background: rgba(15, 23, 42, 0.72);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+      color: #e2e8f0;
+      font-size: 12px;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+    #portTip.show { opacity: 1; transform: translateY(0); }
+    #portTip .k { color: #9fb0cc; }
+    #portTip .v { color: #e2e8f0; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -125,6 +145,7 @@ export class CircuitPanel {
       <div id="details" class="muted">None</div>
     </div>
   </div>
+  <div id="portTip"></div>
   <canvas id="canvas"></canvas>
   <script nonce="${nonce}" type="module">
     let THREE;
@@ -141,6 +162,7 @@ export class CircuitPanel {
     const vscode = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : undefined;
     const canvas = document.getElementById('canvas');
     const details = document.getElementById('details');
+    const portTip = document.getElementById('portTip');
 
     let graph = ${graphJson};
 
@@ -184,14 +206,15 @@ export class CircuitPanel {
 
     const palette = {
       function: 0x60a5fa,
-      variable: 0xfacc15,
-      import: 0xa78bfa,
-      decision: 0x22c55e,
-      source: 0x38bdf8,
       sink: 0xf97316
+    };
+    const portColors = {
+      in: 0xa78bfa,   // purple
+      out: 0x22c55e   // green
     };
 
     const nodeBodies = []; // array of meshes used for raycast
+    const portMeshes = []; // array of meshes used for raycast
     const nodeByMeshUuid = new Map(); // mesh.uuid -> node
     const nodeMeta = new Map(); // node.id -> { group, body, w, h, node }
     const adjacency = new Map(); // nodeId -> edge indices
@@ -202,6 +225,7 @@ export class CircuitPanel {
         while (g.children.length) g.remove(g.children[0]);
       }
       nodeBodies.length = 0;
+      portMeshes.length = 0;
       nodeByMeshUuid.clear();
       nodeMeta.clear();
       adjacency.clear();
@@ -296,7 +320,8 @@ export class CircuitPanel {
         arr.push(n);
         byType.set(n.type, arr);
       }
-      const lanes = ['source', 'import', 'variable', 'function', 'decision', 'sink'];
+      // Function-only view: show only functions and sinks.
+      const lanes = ['function', 'sink'];
       const positions = new Map();
       for (let li = 0; li < lanes.length; li++) {
         const type = lanes[li];
@@ -317,14 +342,6 @@ export class CircuitPanel {
 
     function buildGraphScene(g) {
       clearSceneGroups();
-
-      // Precompute counts for ports.
-      const inCount = new Map();
-      const outCount = new Map();
-      for (const e of g.edges) {
-        outCount.set(e.from, (outCount.get(e.from) || 0) + 1);
-        inCount.set(e.to, (inCount.get(e.to) || 0) + 1);
-      }
 
       const positions = layoutNodes(g.nodes);
 
@@ -371,33 +388,44 @@ export class CircuitPanel {
         const label = makeLabelSprite(labelText);
         label.position.set((-w / 2) + 42 + Math.min(130, label.scale.x * 0.15), 0, 6.5);
 
-        const inputs = inCount.get(node.id) || 0;
-        const outputs = outCount.get(node.id) || 0;
-        const ports = { in: [], out: [] };
+        const inputs = Array.isArray(node.inputs) ? node.inputs : [];
+        const outputs = Array.isArray(node.outputs) ? node.outputs : [];
+        const ports = { in: [], out: [], byId: new Map() };
 
-        const makePort = (x, y, isOut) => {
-          const mat = new THREE.MeshBasicMaterial({ color: isOut ? 0x93c5fd : 0x94a3b8 });
+        const makePort = (x, y, dir, port) => {
+          const mat = new THREE.MeshBasicMaterial({ color: dir === 'out' ? portColors.out : portColors.in });
           const p = new THREE.Mesh(portGeom, mat);
           p.position.set(x, y, 4.5);
           p.userData.kind = 'port';
+          p.userData.nodeId = node.id;
+          p.userData.portId = port.id;
+          p.userData.direction = dir;
+          p.userData.portName = port.name;
+          p.userData.portKind = port.kind;
+          p.userData.portDetail = port.detail || '';
+          portMeshes.push(p);
           return p;
         };
 
         // Distribute ports along left/right edge.
         const portSpan = h - 18;
         const portStart = (h / 2) - 9;
-        for (let i = 0; i < inputs; i++) {
-          const t = (inputs === 1) ? 0.5 : (i / (inputs - 1));
+        for (let i = 0; i < inputs.length; i++) {
+          const t = (inputs.length === 1) ? 0.5 : (i / (inputs.length - 1));
           const y = portStart - t * portSpan;
-          const p = makePort((-w / 2) - 4, y, false);
-          ports.in.push(p);
+          const port = inputs[i];
+          const p = makePort((-w / 2) - 4, y, 'in', port);
+          ports.in.push({ mesh: p, port: port });
+          ports.byId.set(port.id, p);
           group.add(p);
         }
-        for (let i = 0; i < outputs; i++) {
-          const t = (outputs === 1) ? 0.5 : (i / (outputs - 1));
+        for (let i = 0; i < outputs.length; i++) {
+          const t = (outputs.length === 1) ? 0.5 : (i / (outputs.length - 1));
           const y = portStart - t * portSpan;
-          const p = makePort((w / 2) + 4, y, true);
-          ports.out.push(p);
+          const port = outputs[i];
+          const p = makePort((w / 2) + 4, y, 'out', port);
+          ports.out.push({ mesh: p, port: port });
+          ports.byId.set(port.id, p);
           group.add(p);
         }
 
@@ -446,18 +474,32 @@ export class CircuitPanel {
       controls.update();
     }
 
-    function getOutAnchor(nodeId) {
+    function getOutAnchor(nodeId, portId) {
       const meta = nodeMeta.get(nodeId);
       if (!meta) return null;
+      if (portId && meta.ports?.byId?.has(portId)) {
+        const m = meta.ports.byId.get(portId);
+        const p = m.position.clone();
+        p.add(meta.group.position);
+        p.z = 0;
+        return p;
+      }
       const p = meta.group.position.clone();
       p.x += (meta.w / 2) + 8;
       p.z = 0;
       return p;
     }
 
-    function getInAnchor(nodeId) {
+    function getInAnchor(nodeId, portId) {
       const meta = nodeMeta.get(nodeId);
       if (!meta) return null;
+      if (portId && meta.ports?.byId?.has(portId)) {
+        const m = meta.ports.byId.get(portId);
+        const p = m.position.clone();
+        p.add(meta.group.position);
+        p.z = 0;
+        return p;
+      }
       const p = meta.group.position.clone();
       p.x -= (meta.w / 2) + 8;
       p.z = 0;
@@ -465,8 +507,8 @@ export class CircuitPanel {
     }
 
     function updateEdgeVisual(e) {
-      const a = getOutAnchor(e.edge.from);
-      const b = getInAnchor(e.edge.to);
+      const a = getOutAnchor(e.edge.from, e.edge.fromPort);
+      const b = getInAnchor(e.edge.to, e.edge.toPort);
       if (!a || !b) return;
 
       const p1 = a.clone();
@@ -567,6 +609,7 @@ export class CircuitPanel {
       updatePointer(ev);
 
       if (dragging) {
+        hidePortTip();
         raycaster.setFromCamera(pointer, camera);
         if (raycaster.ray.intersectPlane(dragPlane, dragPoint)) {
           const meta = nodeMeta.get(dragging.nodeId);
@@ -580,6 +623,7 @@ export class CircuitPanel {
       }
 
       if (panning) {
+        hidePortTip();
         const dx = ev.clientX - panning.startX;
         const dy = ev.clientY - panning.startY;
 
@@ -598,6 +642,20 @@ export class CircuitPanel {
 
     function onPointerDown(ev) {
       updatePointer(ev);
+
+      // If clicking a port, show tooltip (no navigation).
+      raycaster.setFromCamera(pointer, camera);
+      const portHits = raycaster.intersectObjects(portMeshes, false);
+      const phit = portHits[0] && portHits[0].object ? portHits[0].object : null;
+      if (phit && phit.userData && phit.userData.kind === 'port') {
+        const name = phit.userData.portName || '';
+        const dir = phit.userData.direction || '';
+        const kind = phit.userData.portKind || '';
+        const det = phit.userData.portDetail || '';
+        showPortTip(ev.clientX, ev.clientY, { name, dir, kind, det });
+        return;
+      }
+      hidePortTip();
 
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(nodeBodies, false);
@@ -685,6 +743,33 @@ export class CircuitPanel {
       camera.updateProjectionMatrix();
       renderer.setSize(w, h, false);
       setCursor();
+    }
+
+    function showPortTip(x, y, info) {
+      if (!portTip) return;
+      portTip.innerHTML =
+        '<div><span class="k">Port:</span> <span class="v">' + escape(info.name) + '</span></div>' +
+        '<div><span class="k">Direction:</span> <span class="v">' + escape(info.dir) + '</span></div>' +
+        '<div><span class="k">Kind:</span> <span class="v">' + escape(info.kind) + '</span></div>' +
+        (info.det ? '<div class="k" style="margin-top:6px;">' + escape(info.det) + '</div>' : '');
+      const pad = 14;
+      portTip.style.left = Math.max(pad, x + 12) + 'px';
+      portTip.style.top = Math.max(pad, y + 12) + 'px';
+      portTip.classList.add('show');
+    }
+
+    function hidePortTip() {
+      if (!portTip) return;
+      portTip.classList.remove('show');
+    }
+
+    function escape(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function animate() {

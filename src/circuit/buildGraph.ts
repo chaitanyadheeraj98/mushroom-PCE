@@ -1,227 +1,202 @@
 import * as vscode from 'vscode';
 
 import { parseSymbolLocations } from '../symbols';
-import { SymbolKind } from '../types';
-import { CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeType } from './types';
+import { CircuitEdge, CircuitGraph, CircuitNode, CircuitPort } from './types';
 
-type SymbolIndexEntry = {
-	name: string;
-	kind: SymbolKind;
-	line: number;
-	character: number;
-};
+type FnRange = { startLine: number; endLine: number };
+type FnSymbol = { name: string; line: number; character: number };
 
+// Function-only graph:
+// - One node per function/method
+// - Purple input ports = params
+// - Green output ports = return / side effects
+// - Edges only between linked functions/sinks (calls and basic composition)
 export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 	const code = document.getText();
 	const lines = code.replace(/\r\n/g, '\n').split('\n');
 	const uri = document.uri.toString();
 
-	const symbols = parseSymbolLocations(document).map(
-		(s): SymbolIndexEntry => ({
-			name: s.name,
-			kind: s.kind,
-			line: s.line,
-			character: s.character
-		})
-	);
+	const symbols = parseSymbolLocations(document)
+		.filter((s) => s.kind === 'function')
+		.map((s): FnSymbol => ({ name: s.name, line: s.line, character: s.character }));
+
+	const functionNames = [...new Set(symbols.map((s) => s.name))];
+	const ranges = computeFunctionRanges(lines, functionNames);
 
 	const nodeById = new Map<string, CircuitNode>();
-	const nameToPrimaryId = new Map<string, string>();
-	const addNode = (
-		id: string,
-		type: CircuitNodeType,
-		label: string,
-		detail?: string,
-		line?: number,
-		character?: number
-	): CircuitNode => {
+
+	const addFunctionNode = (fnName: string): CircuitNode => {
+		const id = `function:${fnName}`;
 		const existing = nodeById.get(id);
 		if (existing) {
 			return existing;
 		}
-		const node: CircuitNode = { id, type, label, uri, detail, line, character };
+
+		const sym = symbols.find((s) => s.name === fnName);
+		const range = ranges.get(fnName);
+		const signature = range ? (lines[range.startLine] ?? '') : '';
+		const params = range ? extractParameterNames(signature) : [];
+
+		const inputs: CircuitPort[] = params.map((p) => ({
+			id: `in:${fnName}:${p}`,
+			name: p,
+			direction: 'in',
+			kind: 'param',
+			detail: 'parameter'
+		}));
+
+		const outputs: CircuitPort[] = [
+			{
+				id: `out:${fnName}:return`,
+				name: 'return',
+				direction: 'out',
+				kind: 'return',
+				detail: 'function return value'
+			}
+		];
+
+		const node: CircuitNode = {
+			id,
+			type: 'function',
+			label: fnName,
+			uri,
+			detail: 'function',
+			line: sym?.line,
+			character: sym?.character,
+			inputs,
+			outputs
+		};
 		nodeById.set(id, node);
-		// Track a primary id for simple name lookup (functions/vars/imports).
-		if (!nameToPrimaryId.has(label) && (type === 'function' || type === 'variable' || type === 'import')) {
-			nameToPrimaryId.set(label, id);
-		}
 		return node;
 	};
 
-	// Nodes
-	for (const sym of symbols) {
-		if (sym.kind === 'function') {
-			addNode(`function:${sym.name}`, 'function', sym.name, 'function', sym.line, sym.character);
-		} else if (sym.kind === 'variable') {
-			addNode(`variable:${sym.name}`, 'variable', sym.name, 'variable', sym.line, sym.character);
-		} else if (sym.kind === 'import') {
-			addNode(`import:${sym.name}`, 'import', sym.name, 'import', sym.line, sym.character);
+	const addSinkNode = (label: string, detail: string, line?: number): CircuitNode => {
+		const id = `sink:${label}`;
+		const existing = nodeById.get(id);
+		if (existing) {
+			return existing;
 		}
+		const node: CircuitNode = {
+			id,
+			type: 'sink',
+			label,
+			uri,
+			detail,
+			line,
+			character: 0,
+			inputs: [{ id: `in:${label}:value`, name: 'value', direction: 'in', kind: 'sideEffect', detail: 'incoming value' }],
+			outputs: []
+		};
+		nodeById.set(id, node);
+		return node;
+	};
+
+	for (const name of functionNames) {
+		addFunctionNode(name);
 	}
 
 	const edges: CircuitEdge[] = [];
 	const edgeKey = new Set<string>();
-	const addEdge = (fromId: string, toId: string, label?: string): void => {
-		const from = nodeById.get(fromId);
-		const to = nodeById.get(toId);
-		if (!from || !to || fromId === toId) {
+	const addEdge = (from: string, to: string, fromPort?: string, toPort?: string, label?: string): void => {
+		if (!nodeById.has(from) || !nodeById.has(to) || from === to) {
 			return;
 		}
-		const key = `${fromId}->${toId}:${label ?? ''}`;
+		const key = `${from}:${fromPort ?? ''}->${to}:${toPort ?? ''}:${label ?? ''}`;
 		if (edgeKey.has(key)) {
 			return;
 		}
 		edgeKey.add(key);
-		edges.push({
-			id: `e:${fromId}->${toId}:${edges.length}`,
-			from: fromId,
-			to: toId,
-			label
-		});
+		edges.push({ id: `e:${edges.length}`, from, to, fromPort, toPort, label });
 	};
 
-	// Build naive function call edges and data mention edges.
-	const functionNames = symbols.filter((s) => s.kind === 'function').map((s) => s.name);
-	const importNames = symbols.filter((s) => s.kind === 'import').map((s) => s.name);
-	const variableNames = symbols.filter((s) => s.kind === 'variable').map((s) => s.name);
-
-	const functionRanges = computeFunctionRanges(lines, functionNames);
-
-	// Create a shared sink node for console.log if present.
-	const consoleLines = lines
-		.map((t, idx) => ({ t, idx }))
-		.filter((x) => /\bconsole\.log\s*\(/.test(x.t));
-	const consoleSinkId = consoleLines.length ? 'sink:console.log' : undefined;
-	if (consoleSinkId) {
-		const first = consoleLines[0];
-		addNode(consoleSinkId, 'sink', 'console.log', 'output sink', first.idx, 0);
-	}
-
+	// 1) Calls between functions.
 	for (const fnName of functionNames) {
-		const range = functionRanges.get(fnName);
-		const fnId = nameToPrimaryId.get(fnName) ?? `function:${fnName}`;
-		const bodyLines = range ? lines.slice(range.startLine, range.endLine + 1) : lines;
-		const bodyText = bodyLines.join('\n');
+		const range = ranges.get(fnName);
+		const body = range ? lines.slice(range.startLine, range.endLine + 1).join('\n') : code;
+		const fromId = `function:${fnName}`;
 
-		// Function param sources -> function
-		if (range) {
-			const signatureLine = lines[range.startLine] ?? '';
-			const params = extractParameterNames(signatureLine);
-			for (const p of params) {
-				const pid = `source:param:${fnName}:${p}`;
-				addNode(pid, 'source', p, `param of ${fnName}`, range.startLine, Math.max(0, signatureLine.indexOf(p)));
-				addEdge(pid, fnId, p);
-			}
-		}
-
-		// Imports used by function
-		for (const imp of importNames) {
-			if (containsIdentifier(bodyText, imp)) {
-				const fromId = nameToPrimaryId.get(imp) ?? `import:${imp}`;
-				addEdge(fromId, fnId, imp);
-			}
-		}
-
-		// Variables mentioned by function
-		for (const v of variableNames) {
-			if (containsIdentifier(bodyText, v)) {
-				const fromId = nameToPrimaryId.get(v) ?? `variable:${v}`;
-				addEdge(fromId, fnId, v);
-			}
-		}
-
-		// Function calls inside function
 		for (const called of functionNames) {
 			if (called === fnName) {
 				continue;
 			}
-			if (new RegExp(`\\b${escapeRegExp(called)}\\s*\\(`).test(bodyText)) {
-				const toId = nameToPrimaryId.get(called) ?? `function:${called}`;
-				addEdge(fnId, toId, 'calls');
+			if (new RegExp(`\\b${escapeRegExp(called)}\\s*\\(`).test(body)) {
+				addEdge(fromId, `function:${called}`, `out:${fnName}:return`, undefined, 'calls');
 			}
 		}
+	}
 
-		// Control flow nodes in order: if/while/for/switch/try/catch + return.
-		const controlNodeIds: string[] = [];
-		if (range) {
-			for (let li = range.startLine; li <= range.endLine; li++) {
-				const raw = lines[li] ?? '';
-				const trimmed = raw.trim();
-				if (!trimmed) {
+	// 2) console.log(fn(...)) -> sink
+	const consoleLines = lines
+		.map((t, idx) => ({ t, idx }))
+		.filter((x) => /\bconsole\.log\s*\(/.test(x.t));
+	if (consoleLines.length) {
+		const sink = addSinkNode('console.log', 'console output', consoleLines[0].idx);
+		const sinkIn = sink.inputs?.[0]?.id;
+		for (const fnName of functionNames) {
+			const re = new RegExp(`\\bconsole\\.log\\s*\\([^\\)]*\\b${escapeRegExp(fnName)}\\s*\\(`);
+			if (re.test(code)) {
+				addEdge(`function:${fnName}`, sink.id, `out:${fnName}:return`, sinkIn, 'output');
+			}
+		}
+	}
+
+	// 3) bar(foo(x)) => foo return feeds bar param[0]
+	for (const raw of lines) {
+		for (const outer of functionNames) {
+			const outerCall = new RegExp(`\\b${escapeRegExp(outer)}\\s*\\((.*)\\)`);
+			const m = outerCall.exec(raw);
+			if (!m?.[1]) {
+				continue;
+			}
+			for (const inner of functionNames) {
+				if (inner === outer) {
 					continue;
 				}
-
-				const addControl = (kind: string, label: string, detail: string) => {
-					const id = `decision:${fnName}:${kind}@${li}`;
-					addNode(id, 'decision', label, detail, li, Math.max(0, raw.indexOf(kind)));
-					controlNodeIds.push(id);
-				};
-
-				const ifMatch = /\bif\s*\(([^)]*)\)/.exec(raw);
-				if (ifMatch?.[1]) {
-					addControl('if', `if (${ifMatch[1].trim()})`, 'if/else branch');
-				}
-				const whileMatch = /\bwhile\s*\(([^)]*)\)/.exec(raw);
-				if (whileMatch?.[1]) {
-					addControl('while', `while (${whileMatch[1].trim()})`, 'loop');
-				}
-				const forMatch = /\bfor\s*\(([^)]*)\)/.exec(raw);
-				if (forMatch?.[1]) {
-					addControl('for', `for (${forMatch[1].trim()})`, 'loop');
-				}
-				if (/\bswitch\s*\(/.test(raw)) {
-					addControl('switch', 'switch (...)', 'branch');
-				}
-				if (/\btry\b/.test(trimmed)) {
-					addControl('try', 'try { ... }', 'error path');
-				}
-				if (/\bcatch\b/.test(trimmed)) {
-					addControl('catch', 'catch (...)', 'error path');
-				}
-			}
-
-			// Return sink
-			const returnLine = findFirstLine(range.startLine, range.endLine, lines, /\breturn\b/);
-			let returnId: string | undefined;
-			if (typeof returnLine === 'number') {
-				returnId = `sink:return:${fnName}`;
-				addNode(returnId, 'sink', `return (${fnName})`, 'return value', returnLine, 0);
-			}
-
-			// Wire the flow: fn -> control... -> return
-			if (controlNodeIds.length) {
-				addEdge(fnId, controlNodeIds[0], 'flow');
-				for (let i = 0; i < controlNodeIds.length - 1; i++) {
-					addEdge(controlNodeIds[i], controlNodeIds[i + 1], 'next');
-				}
-				if (returnId) {
-					addEdge(controlNodeIds[controlNodeIds.length - 1], returnId, 'return');
-				}
-			} else if (returnId) {
-				addEdge(fnId, returnId, 'return');
-			}
-
-			// If file has console.log, connect function -> console sink when used.
-			if (consoleSinkId && containsIdentifier(code, fnName) && /\bconsole\.log\s*\(/.test(code)) {
-				// Only link if console.log(...) calls this function somewhere.
-				if (new RegExp(`\\bconsole\\.log\\s*\\([^)]*\\b${escapeRegExp(fnName)}\\s*\\(`).test(code)) {
-					addEdge(returnId ?? fnId, consoleSinkId, 'output');
+				if (new RegExp(`\\b${escapeRegExp(inner)}\\s*\\(`).test(m[1])) {
+					const outerNode = nodeById.get(`function:${outer}`);
+					const toPort = outerNode?.inputs?.[0]?.id;
+					addEdge(`function:${inner}`, `function:${outer}`, `out:${inner}:return`, toPort, 'feeds');
 				}
 			}
 		}
 	}
 
-	return {
-		nodes: [...nodeById.values()],
-		edges
-	};
+	// 4) const t = foo(...); bar(t);
+	const tempValueMap = new Map<string, string>(); // tempVar -> producerFn
+	for (const raw of lines) {
+		const assign = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\(/.exec(raw);
+		if (assign?.[1] && assign?.[2] && functionNames.includes(assign[2])) {
+			tempValueMap.set(assign[1], assign[2]);
+		}
+
+		for (const consumer of functionNames) {
+			const call = new RegExp(`\\b${escapeRegExp(consumer)}\\s*\\(([^\\)]*)\\)`);
+			const m = call.exec(raw);
+			if (!m?.[1]) {
+				continue;
+			}
+			for (const [tempVar, producerFn] of tempValueMap.entries()) {
+				if (new RegExp(`\\b${escapeRegExp(tempVar)}\\b`).test(m[1])) {
+					const consumerNode = nodeById.get(`function:${consumer}`);
+					const toPort = consumerNode?.inputs?.[0]?.id;
+					addEdge(`function:${producerFn}`, `function:${consumer}`, `out:${producerFn}:return`, toPort, tempVar);
+				}
+			}
+		}
+	}
+
+	return { nodes: [...nodeById.values()], edges };
 }
 
-function computeFunctionRanges(lines: string[], functionNames: string[]): Map<string, { startLine: number; endLine: number }> {
-	const ranges = new Map<string, { startLine: number; endLine: number }>();
+function computeFunctionRanges(lines: string[], functionNames: string[]): Map<string, FnRange> {
+	const ranges = new Map<string, FnRange>();
 	const fnRegexes = functionNames.map((name) => ({
 		name,
-		re: new RegExp(`\\bfunction\\s+${escapeRegExp(name)}\\b|\\b${escapeRegExp(name)}\\s*=\\s*(?:async\\s*)?\\([^)]*\\)\\s*=>|\\b${escapeRegExp(name)}\\s*\\([^)]*\\)\\s*\\{`)
+		re: new RegExp(
+			`\\bfunction\\s+${escapeRegExp(name)}\\b|\\b${escapeRegExp(name)}\\s*=\\s*(?:async\\s*)?\\([^)]*\\)\\s*=>|\\b${escapeRegExp(
+				name
+			)}\\s*\\([^)]*\\)\\s*\\{`
+		)
 	}));
 
 	for (let i = 0; i < lines.length; i++) {
@@ -260,14 +235,6 @@ function findBlockEnd(lines: string[], startLine: number): number | undefined {
 	return undefined;
 }
 
-function containsIdentifier(text: string, identifier: string): boolean {
-	return new RegExp(`\\b${escapeRegExp(identifier)}\\b`).test(text);
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function extractParameterNames(line: string): string[] {
 	const matches: string[] = [];
 	const parenMatch = /\(([^)]*)\)/.exec(line);
@@ -293,11 +260,6 @@ function extractParameterNames(line: string): string[] {
 	return matches;
 }
 
-function findFirstLine(startLine: number, endLine: number, lines: string[], re: RegExp): number | undefined {
-	for (let li = startLine; li <= endLine; li++) {
-		if (re.test(lines[li] ?? '')) {
-			return li;
-		}
-	}
-	return undefined;
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
