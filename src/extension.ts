@@ -1,34 +1,23 @@
 import * as vscode from 'vscode';
 
-type ModelOption = {
-	id: string;
-	label: string;
-	detail: string;
-};
-
-type SymbolKind = 'function' | 'variable' | 'import';
-
-type SymbolLocation = {
-	name: string;
-	uri: vscode.Uri;
-	line: number;
-	character: number;
-	kind: SymbolKind;
-};
-
-type SymbolLink = {
-	name: string;
-	kind: SymbolKind;
-	commandUri: string;
-};
+import { buildPrompt } from './prompts';
+import { MushroomPanel } from './panel';
+import { parseSymbolLocations } from './symbols';
+import { ModelOption, ResponseMode, SymbolLink } from './types';
 
 export function activate(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
 	const output = vscode.window.createOutputChannel('Mushroom PCE');
 	let lastDocument: vscode.TextDocument | undefined;
 	let lastEditorColumn: vscode.ViewColumn = vscode.ViewColumn.One;
+
 	let availableModels: vscode.LanguageModelChat[] = [];
 	let selectedModelId: string | undefined;
+	let selectedResponseMode: ResponseMode = 'developer';
+
+	let symbolIndexTimer: ReturnType<typeof setTimeout> | undefined;
+	type CacheEntry = { text: string; updatedAt: number; docVersion: number };
+	const analysisCache = new Map<string, CacheEntry>();
 
 	const rememberEditor = (editor: vscode.TextEditor | undefined): void => {
 		if (!editor) {
@@ -43,7 +32,11 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	};
 
-	rememberEditor(vscode.window.activeTextEditor);
+	recognizeActiveEditor();
+
+	function recognizeActiveEditor(): void {
+		rememberEditor(vscode.window.activeTextEditor);
+	}
 
 	const formatModelOption = (model: vscode.LanguageModelChat): ModelOption => ({
 		id: model.id,
@@ -56,6 +49,50 @@ export function activate(context: vscode.ExtensionContext) {
 		const selectedLabel = selected ? `${selected.name} (${selected.vendor}/${selected.family})` : 'No model selected';
 		const modelLabels = availableModels.map((m) => `${m.name} (${m.vendor}/${m.family})`);
 		panel.setModelInfo(selectedLabel, modelLabels);
+	};
+
+	const applyModeStateToPanel = (panel: MushroomPanel): void => {
+		panel.setResponseModeInfo(selectedResponseMode);
+	};
+
+	const getCurrentDocument = (): vscode.TextDocument | undefined => {
+		const editor = vscode.window.activeTextEditor;
+		return editor?.document ?? lastDocument;
+	};
+
+	const getCacheKey = (doc: vscode.TextDocument, modelId: string, mode: ResponseMode): string =>
+		`${doc.uri.toString()}::${modelId}::${mode}`;
+
+	const tryRestoreCachedAnalysis = async (panel: MushroomPanel): Promise<boolean> => {
+		if (panel.isDisposed()) {
+			return false;
+		}
+
+		const doc = getCurrentDocument();
+		if (!doc) {
+			return false;
+		}
+
+		await loadModels(panel);
+		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+		if (!model) {
+			return false;
+		}
+
+		const key = getCacheKey(doc, model.id, selectedResponseMode);
+		const cached = analysisCache.get(key);
+		if (!cached) {
+			return false;
+		}
+
+		// If user changed the file since the cached analysis, require re-analyze.
+		if (cached.docVersion !== doc.version) {
+			return false;
+		}
+
+		panel.setExplanation(cached.text);
+		panel.setStatus(`Cached (${selectedResponseMode}) at ${new Date(cached.updatedAt).toLocaleTimeString()}`);
+		return true;
 	};
 
 	const applySymbolStateToPanel = (panel: MushroomPanel, document: vscode.TextDocument): void => {
@@ -116,7 +153,7 @@ export function activate(context: vscode.ExtensionContext) {
 		panel.clear();
 		panel.setAnalyzing(true);
 		panel.setStatus('Analyzing...');
-		output.appendLine(`Analyzing language=${document.languageId}, chars=${code.length}`);
+		output.appendLine(`Analyzing mode=${selectedResponseMode}, language=${document.languageId}, chars=${code.length}`);
 
 		await loadModels(panel);
 		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
@@ -130,7 +167,7 @@ export function activate(context: vscode.ExtensionContext) {
 		output.appendLine(`using model id=${model.id}`);
 
 		let streamed = false;
-		const explanation = await explainCode(model, code, document.languageId, (chunk) => {
+		const explanation = await explainCode(model, code, document.languageId, selectedResponseMode, (chunk) => {
 			if (runId !== latestRunId || panel.isDisposed()) {
 				return;
 			}
@@ -144,6 +181,11 @@ export function activate(context: vscode.ExtensionContext) {
 
 		if (!streamed) {
 			panel.setExplanation(explanation || 'No explanation generated.');
+		}
+
+		if (explanation) {
+			const cacheKey = getCacheKey(document, model.id, selectedResponseMode);
+			analysisCache.set(cacheKey, { text: explanation, updatedAt: Date.now(), docVersion: document.version });
 		}
 
 		panel.setAnalyzing(false);
@@ -168,6 +210,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 		panel.setStatus('Ready');
 		panel.setExplanation('Click Analyze to explain the active file.');
+		applyModeStateToPanel(panel);
+
 		if (lastDocument) {
 			applySymbolStateToPanel(panel, lastDocument);
 		}
@@ -197,14 +241,13 @@ export function activate(context: vscode.ExtensionContext) {
 					preview: true
 				});
 				const position = new vscode.Position(Math.max(0, line), Math.max(0, character));
-				const selection = new vscode.Selection(position, position);
-				editor.selection = selection;
+				editor.selection = new vscode.Selection(position, position);
 				editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
 				if (editor.viewColumn) {
 					lastEditorColumn = editor.viewColumn;
 				}
 			} catch (error: any) {
-				vscode.window.showErrorMessage('Could not navigate to function: ' + (error?.message ?? String(error)));
+				vscode.window.showErrorMessage('Could not navigate to symbol: ' + (error?.message ?? String(error)));
 			}
 		}
 	);
@@ -240,11 +283,35 @@ export function activate(context: vscode.ExtensionContext) {
 		selectedModelId = picked.modelId;
 		if (panel && !panel.isDisposed()) {
 			applyModelStateToPanel(panel);
+			// If we have cached output for this model+mode, show it immediately.
+			await tryRestoreCachedAnalysis(panel);
 		}
 		vscode.window.showInformationMessage(`Mushroom PCE model set to: ${picked.label}`);
 		output.appendLine(`model selected: ${picked.modelId}`);
 	});
-	
+
+	const setListModeCommand = vscode.commands.registerCommand('mushroom-pce.setListMode', async () => {
+		selectedResponseMode = 'list';
+		const panel = MushroomPanel.getCurrentPanel();
+		if (panel && !panel.isDisposed()) {
+			applyModeStateToPanel(panel);
+			await tryRestoreCachedAnalysis(panel);
+		}
+		vscode.window.showInformationMessage('Mushroom PCE mode set to List Mode');
+		output.appendLine('response mode selected: list');
+	});
+
+	const setDeveloperModeCommand = vscode.commands.registerCommand('mushroom-pce.setDeveloperMode', async () => {
+		selectedResponseMode = 'developer';
+		const panel = MushroomPanel.getCurrentPanel();
+		if (panel && !panel.isDisposed()) {
+			applyModeStateToPanel(panel);
+			await tryRestoreCachedAnalysis(panel);
+		}
+		vscode.window.showInformationMessage('Mushroom PCE mode set to Developer Mode');
+		output.appendLine('response mode selected: developer');
+	});
+
 	const statusBarAnalyze = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 	statusBarAnalyze.text = '$(sparkle) PCE Analyze';
 	statusBarAnalyze.tooltip = 'Analyze active file with Mushroom PCE';
@@ -264,15 +331,24 @@ export function activate(context: vscode.ExtensionContext) {
 		if (!panel || panel.isDisposed()) {
 			return;
 		}
-		if (lastDocument && event.document.uri.toString() === lastDocument.uri.toString()) {
-			applySymbolStateToPanel(panel, event.document);
+		if (!lastDocument || event.document.uri.toString() !== lastDocument.uri.toString()) {
+			return;
 		}
+
+		if (symbolIndexTimer) {
+			clearTimeout(symbolIndexTimer);
+		}
+		symbolIndexTimer = setTimeout(() => {
+			applySymbolStateToPanel(panel, event.document);
+		}, 250);
 	});
 
 	context.subscriptions.push(
 		startCommand,
 		analyzeCommand,
 		selectModelCommand,
+		setListModeCommand,
+		setDeveloperModeCommand,
 		goToFunctionCommand,
 		statusBarAnalyze,
 		output,
@@ -281,65 +357,16 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 }
 
-async function explainCode(model: vscode.LanguageModelChat, code: string, languageId: string, onChunk?: (chunk: string) => void): Promise<string | undefined> {
+async function explainCode(
+	model: vscode.LanguageModelChat,
+	code: string,
+	languageId: string,
+	responseMode: ResponseMode,
+	onChunk?: (chunk: string) => void
+): Promise<string | undefined> {
 	try {
-		const prompt = `
-You are a friendly programming teacher for complete beginners.
-
-Return Markdown only. Keep it clean, simple, and easy to read.
-
-Required structure (use exactly these headings):
-# Quick Summary
-# Logic and Flow
-# Functions
-# Data Structures
-# Program Structure
-# Debugging and Quality
-# Real-World Reading Path
-# Imports and External Packages
-# Example Input and Output
-# Important Lines Explained
-# Step-by-Step Flow
-# Beginner Story
-# Key Takeaways
-
-Formatting rules:
-- Use short bullet points.
-- Do not use markdown tables.
-- Use backticks for code identifiers.
-- When referencing a symbol, wrap only the bare identifier in backticks (for example, \`myFunction\`, not \`myFunction(arg)\`).
-- If a section has no items, write: - None
-- Keep explanations simple, visual, and beginner-friendly.
-- Start with what the code is trying to achieve in 1-2 sentences.
-- Explain every new technical term in one short line.
-- Explain not only what each part does, but why it exists.
-- Use a beginner tone: "assume I have never seen this before."
-- Explain what each import/package is used for in plain language.
-- Explain what would happen without each important import/package.
-- In "Logic and Flow", explicitly cover condition checks, loops, and boolean/comparison usage.
-- In "Functions", explain input -> process -> output for each important function.
-- In "Data Structures", show simple example values and how data changes over time.
-- In "Program Structure", explain where execution starts and how parts connect.
-- In "Debugging and Quality", include 2-3 common beginner mistakes and how to fix them.
-- In "Real-World Reading Path", explain how data flows through variables, arrays/objects, and function calls.
-- In "Example Input and Output", provide concrete sample input and expected output.
-- In "Important Lines Explained", explain key lines only (not every single line).
-- In "Step-by-Step Flow", simulate execution with a small sample and show state changes.
-- In "Beginner Story", use one short real-life analogy (recipe/shopping/etc.) and keep it memorable.
-- In "Deeper Concepts", mention async/promises/recursion/complexity only if actually present.
-- In "Deeper Concepts", keep each concept to 1-2 lines max.
-- Avoid jargon unless you also define it in one sentence.
-- Keep each section concise to avoid overload (roughly 3-7 bullets per section when possible).
-
-Code (${languageId}):
-\`\`\`${languageId}
-${code}
-\`\`\`
-`;
-
-		const messages = [
-			new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, prompt)
-		];
+		const prompt = buildPrompt(languageId, code, responseMode);
+		const messages = [new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, prompt)];
 
 		const response = await model.sendRequest(messages);
 		const res: any = response;
@@ -408,685 +435,4 @@ function extractTextFromChunk(chunk: unknown): string {
 	}
 
 	return '';
-}
-
-function parseSymbolLocations(document: vscode.TextDocument): SymbolLocation[] {
-	const locations: SymbolLocation[] = [];
-	const seen = new Set<string>();
-
-	for (let lineIndex = 0; lineIndex < document.lineCount; lineIndex++) {
-		const rawLine = document.lineAt(lineIndex).text;
-		const trimmed = rawLine.trim();
-		if (!trimmed) {
-			continue;
-		}
-
-		const matches: Array<{ name: string; index: number; kind: SymbolKind }> = [];
-
-		const importNamed = /^\s*import\s+(?:type\s+)?\{([^}]+)\}\s+from\b/.exec(rawLine);
-		if (importNamed?.[1]) {
-			for (const part of importNamed[1].split(',')) {
-				const cleaned = part.trim().split(/\s+as\s+/i)[0]?.trim();
-				if (cleaned) {
-					matches.push({ name: cleaned, index: rawLine.indexOf(cleaned), kind: 'import' });
-				}
-			}
-		}
-
-		const importDefault = /^\s*import\s+([A-Za-z_$][\w$]*)\s+from\b/.exec(rawLine);
-		if (importDefault?.[1]) {
-			matches.push({ name: importDefault[1], index: rawLine.indexOf(importDefault[1]), kind: 'import' });
-		}
-
-		const importAlias = /^\s*import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\b/.exec(rawLine);
-		if (importAlias?.[1]) {
-			matches.push({ name: importAlias[1], index: rawLine.indexOf(importAlias[1]), kind: 'import' });
-		}
-
-		const varDecl = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/.exec(rawLine);
-		if (varDecl?.[1]) {
-			matches.push({ name: varDecl[1], index: rawLine.indexOf(varDecl[1]), kind: 'variable' });
-		}
-		const reassignment = /^\s*([A-Za-z_$][\w$]*)\s*=/.exec(rawLine);
-		if (reassignment?.[1] && !['const', 'let', 'var'].includes(reassignment[1])) {
-			matches.push({ name: reassignment[1], index: rawLine.indexOf(reassignment[1]), kind: 'variable' });
-		}
-
-		const fnDecl = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/.exec(rawLine);
-		if (fnDecl?.[1]) {
-			matches.push({ name: fnDecl[1], index: fnDecl.index, kind: 'function' });
-		}
-		for (const param of extractParameterNames(rawLine)) {
-			matches.push({ name: param, index: rawLine.indexOf(param), kind: 'variable' });
-		}
-
-		const arrowFn = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/.exec(rawLine);
-		if (arrowFn?.[1]) {
-			matches.push({ name: arrowFn[1], index: arrowFn.index, kind: 'function' });
-		}
-
-		const classMethod = /^\s*(?:public\s+|private\s+|protected\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/.exec(rawLine);
-		if (classMethod?.[1]) {
-			const disallowed = new Set(['if', 'for', 'while', 'switch', 'catch', 'function', 'constructor']);
-			if (!disallowed.has(classMethod[1])) {
-				matches.push({ name: classMethod[1], index: rawLine.indexOf(classMethod[1]), kind: 'function' });
-			}
-		}
-
-		const pyFn = /^\s*def\s+([A-Za-z_]\w*)\s*\(/.exec(rawLine);
-		if (pyFn?.[1]) {
-			matches.push({ name: pyFn[1], index: rawLine.indexOf(pyFn[1]), kind: 'function' });
-		}
-
-		const goFn = /^\s*func\s+([A-Za-z_]\w*)\s*\(/.exec(rawLine);
-		if (goFn?.[1]) {
-			matches.push({ name: goFn[1], index: rawLine.indexOf(goFn[1]), kind: 'function' });
-		}
-
-		for (const match of matches) {
-			const key = `${match.kind}:${match.name}:${lineIndex}`;
-			if (seen.has(key)) {
-				continue;
-			}
-			seen.add(key);
-			locations.push({
-				name: match.name,
-				uri: document.uri,
-				line: lineIndex,
-				character: Math.max(0, match.index),
-				kind: match.kind
-			});
-		}
-	}
-
-	return locations;
-}
-
-function extractParameterNames(line: string): string[] {
-	const matches: string[] = [];
-	const parenMatch = /\(([^)]*)\)/.exec(line);
-	if (!parenMatch?.[1]) {
-		return matches;
-	}
-
-	for (const rawPart of parenMatch[1].split(',')) {
-		const trimmed = rawPart.trim();
-		if (!trimmed) {
-			continue;
-		}
-		const base = trimmed
-			.replace(/^[.\s]*\.{3}/, '')
-			.replace(/[:=].*$/, '')
-			.replace(/[{}\[\]\s]/g, '')
-			.trim();
-		if (/^[A-Za-z_$][\w$]*$/.test(base) && !matches.includes(base)) {
-			matches.push(base);
-		}
-	}
-
-	return matches;
-}
-
-class MushroomPanel {
-	private static currentPanel: MushroomPanel | undefined;
-	private readonly panel: vscode.WebviewPanel;
-	private readonly disposables: vscode.Disposable[] = [];
-	private disposed = false;
-	private status = 'Ready';
-	private rawText = 'Click Analyze to explain the active file.';
-	private analyzing = false;
-	private currentModel = 'No model selected';
-	private availableModelLabels: string[] = [];
-	private symbolLinks: SymbolLink[] = [];
-
-	static getCurrentPanel(): MushroomPanel | undefined {
-		return MushroomPanel.currentPanel;
-	}
-
-	static createOrShow(): MushroomPanel {
-		if (MushroomPanel.currentPanel && !MushroomPanel.currentPanel.isDisposed()) {
-			MushroomPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
-			return MushroomPanel.currentPanel;
-		}
-
-		const panel = vscode.window.createWebviewPanel(
-			'mushroomPcePanel',
-			'Mushroom PCE',
-			vscode.ViewColumn.Beside,
-			{
-				enableScripts: true,
-				enableCommandUris: true,
-				retainContextWhenHidden: true
-			}
-		);
-
-		MushroomPanel.currentPanel = new MushroomPanel(panel);
-		return MushroomPanel.currentPanel;
-	}
-
-	private constructor(panel: vscode.WebviewPanel) {
-		this.panel = panel;
-		this.render();
-		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
-	}
-
-	dispose(): void {
-		this.disposed = true;
-		MushroomPanel.currentPanel = undefined;
-		while (this.disposables.length) {
-			const item = this.disposables.pop();
-			item?.dispose();
-		}
-	}
-
-	isDisposed(): boolean {
-		return this.disposed;
-	}
-
-	clear(): void {
-		this.rawText = '';
-		this.render();
-	}
-
-	appendChunk(chunk: string): void {
-		this.rawText += chunk;
-		this.render();
-	}
-
-	setExplanation(text: string): void {
-		this.rawText = text;
-		this.render();
-	}
-
-	setStatus(text: string): void {
-		this.status = text;
-		this.render();
-	}
-
-	setAnalyzing(isAnalyzing: boolean): void {
-		this.analyzing = isAnalyzing;
-		this.render();
-	}
-
-	setModelInfo(currentModel: string, availableModels: string[]): void {
-		this.currentModel = currentModel;
-		this.availableModelLabels = availableModels;
-		this.render();
-	}
-
-	setSymbolLinks(symbolLinks: SymbolLink[]): void {
-		this.symbolLinks = symbolLinks;
-		this.render();
-	}
-
-	private render(): void {
-		if (this.disposed) {
-			return;
-		}
-		this.panel.webview.html = this.getHtml(
-			this.panel.webview,
-			this.status,
-			this.rawText,
-			this.analyzing,
-			this.currentModel,
-			this.availableModelLabels
-		);
-	}
-
-	private getHtml(
-		webview: vscode.Webview,
-		status: string,
-		text: string,
-		analyzing: boolean,
-		currentModel: string,
-		availableModels: string[]
-	): string {
-		const cspSource = webview.cspSource;
-		const explainHtml = markdownToHtml(text, this.symbolLinks);
-		const buttonHtml = analyzing
-			? '<span class="analyze-btn disabled">Analyzing...</span>'
-			: '<a id="analyzeBtn" class="analyze-btn" href="command:mushroom-pce.analyzeActive">Analyze</a>';
-		const modelListHtml = availableModels.length
-			? `<ul class="model-list">${availableModels.map((model) => `<li>${escapeHtml(model)}</li>`).join('')}</ul>`
-			: '<div class="hint">No models found</div>';
-
-		return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline';">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Mushroom PCE</title>
-  <style>
-    :root {
-      --bg: #0b1020;
-      --panel: #0f172a;
-      --text: #e2e8f0;
-      --muted: #9fb0cc;
-      --accent: #22c55e;
-      --border: #21304d;
-      --code-bg: #0b1225;
-      --heading: #f8fafc;
-      --btn: #16a34a;
-      --btn-hover: #15803d;
-      --btn-disabled: #334155;
-    }
-    body {
-      margin: 0;
-      padding: 0;
-      background: radial-gradient(circle at top right, #1e293b, var(--bg) 55%);
-      color: var(--text);
-      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-    }
-    .wrap {
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      box-sizing: border-box;
-      padding: 16px;
-      gap: 10px;
-    }
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 10px;
-    }
-    .title {
-      font-size: 18px;
-      font-weight: 700;
-      letter-spacing: 0.2px;
-      color: var(--heading);
-    }
-    .status {
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .toolbar {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-    .model-card {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px 12px;
-      background: color-mix(in oklab, var(--panel) 85%, black);
-    }
-    .model-title {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 4px;
-    }
-    .model-current {
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 6px;
-    }
-    .model-actions {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 6px;
-    }
-    .model-list {
-      margin: 4px 0 0 16px;
-      padding: 0;
-      font-size: 12px;
-      color: var(--muted);
-      max-height: 90px;
-      overflow-y: auto;
-    }
-    .analyze-btn {
-      display: inline-block;
-      border: none;
-      border-radius: 8px;
-      padding: 8px 12px;
-      font-size: 13px;
-      font-weight: 600;
-      color: #ffffff;
-      background: var(--btn);
-      cursor: pointer;
-      text-decoration: none;
-    }
-    .analyze-btn:hover {
-      background: var(--btn-hover);
-    }
-    .analyze-btn.disabled {
-      background: var(--btn-disabled);
-      cursor: not-allowed;
-      pointer-events: none;
-    }
-    .fallback-link {
-      color: #93c5fd;
-      font-size: 12px;
-      text-decoration: none;
-    }
-    .fallback-link:hover {
-      text-decoration: underline;
-    }
-    .content {
-      flex: 1;
-      overflow-y: auto;
-      background: color-mix(in oklab, var(--panel) 95%, black);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 16px;
-      line-height: 1.65;
-      font-size: 14px;
-    }
-    .content h1,
-    .content h2,
-    .content h3 {
-      margin: 16px 0 8px;
-      color: var(--heading);
-      line-height: 1.35;
-    }
-    .content h1 { font-size: 20px; }
-    .content h2 { font-size: 17px; }
-    .content h3 { font-size: 15px; }
-    .content p { margin: 8px 0; }
-    .content ul,
-    .content ol {
-      margin: 8px 0 8px 20px;
-      padding: 0;
-    }
-    .content li { margin: 4px 0; }
-    .content code {
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 1px 6px;
-      font-family: Consolas, "Courier New", monospace;
-      font-size: 13px;
-    }
-    .content a.symbol-link {
-      text-decoration: none;
-      cursor: pointer;
-      border-bottom: 1px dashed transparent;
-    }
-    .content a.symbol-link code {
-      border-color: transparent;
-    }
-    .content a.symbol-link.symbol-function code {
-      color: #93c5fd;
-    }
-    .content a.symbol-link.symbol-variable code {
-      color: #facc15;
-    }
-    .content a.symbol-link.symbol-import code {
-      color: #a78bfa;
-    }
-    .content a.symbol-link:hover {
-      border-bottom-color: currentColor;
-    }
-    .content pre {
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px;
-      overflow-x: auto;
-      margin: 10px 0;
-    }
-    .content pre code {
-      background: transparent;
-      border: none;
-      border-radius: 0;
-      padding: 0;
-    }
-    .dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 999px;
-      display: inline-block;
-      margin-right: 8px;
-      background: var(--accent);
-      box-shadow: 0 0 10px color-mix(in oklab, var(--accent) 65%, white);
-    }
-    .spacer { height: 4px; }
-    .hint { color: var(--muted); font-size: 12px; }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="header">
-      <div class="title"><span class="dot"></span>Mushroom PCE</div>
-      <div class="status">${escapeHtml(status)}</div>
-    </div>
-    <div class="model-card">
-      <div class="model-title">Model In Use</div>
-      <div class="model-current">${escapeHtml(currentModel)}</div>
-      <div class="model-actions">
-        <a class="fallback-link" href="command:mushroom-pce.selectModel">Select Model</a>
-      </div>
-      ${modelListHtml}
-    </div>
-    <div class="toolbar">
-      ${buttonHtml}
-      <a class="fallback-link" href="command:mushroom-pce.analyzeActive">Analyze (fallback)</a>
-      <div class="hint">Update your code, then click Analyze.</div>
-    </div>
-    <div class="content">${explainHtml}</div>
-  </div>
-</body>
-</html>`;
-	}
-}
-
-function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): string {
-	if (!markdown.trim()) {
-		return '<p>Click Analyze to explain the active file.</p>';
-	}
-
-	const lines = markdown.replace(/\r\n/g, '\n').split('\n');
-	const out: string[] = [];
-	let inCode = false;
-	let listMode: '' | 'ul' | 'ol' = '';
-
-	const closeList = () => {
-		if (listMode === 'ul') {
-			out.push('</ul>');
-		}
-		if (listMode === 'ol') {
-			out.push('</ol>');
-		}
-		listMode = '';
-	};
-
-	for (const rawLine of lines) {
-		const line = rawLine.trim();
-		if (line.startsWith('```')) {
-			closeList();
-			out.push(inCode ? '</code></pre>' : '<pre><code>');
-			inCode = !inCode;
-			continue;
-		}
-		if (inCode) {
-			out.push(`${escapeHtml(rawLine)}\n`);
-			continue;
-		}
-		if (!line) {
-			closeList();
-			continue;
-		}
-		if (line.startsWith('### ')) {
-			closeList();
-			out.push(`<h3>${inlineMd(line.slice(4), symbolLinks)}</h3>`);
-			continue;
-		}
-		if (line.startsWith('## ')) {
-			closeList();
-			out.push(`<h2>${inlineMd(line.slice(3), symbolLinks)}</h2>`);
-			continue;
-		}
-		if (line.startsWith('# ')) {
-			closeList();
-			out.push(`<h1>${inlineMd(line.slice(2), symbolLinks)}</h1>`);
-			continue;
-		}
-		if (/^[-*]\s+/.test(line)) {
-			if (listMode !== 'ul') {
-				closeList();
-				out.push('<ul>');
-				listMode = 'ul';
-			}
-			out.push(`<li>${inlineMd(line.replace(/^[-*]\s+/, ''), symbolLinks)}</li>`);
-			continue;
-		}
-		if (/^\d+\.\s+/.test(line)) {
-			if (listMode !== 'ol') {
-				closeList();
-				out.push('<ol>');
-				listMode = 'ol';
-			}
-			out.push(`<li>${inlineMd(line.replace(/^\d+\.\s+/, ''), symbolLinks)}</li>`);
-			continue;
-		}
-		closeList();
-		out.push(`<p>${inlineMd(line, symbolLinks)}</p>`);
-	}
-	closeList();
-	return out.join('') || '<p>No explanation generated.</p>';
-}
-
-function inlineMd(text: string, symbolLinks: SymbolLink[]): string {
-	let result = escapeHtml(text);
-	const symbolMap = new Map<string, SymbolLink[]>();
-	for (const symbol of symbolLinks) {
-		const existing = symbolMap.get(symbol.name) ?? [];
-		existing.push(symbol);
-		symbolMap.set(symbol.name, existing);
-	}
-
-	result = result.replace(/#sym:([A-Za-z_$][\w$]*)/g, (_whole, token: string) => {
-		const symbol = resolveSymbolForToken(token, symbolMap);
-		if (!symbol) {
-			return `#sym:${escapeHtml(token)}`;
-		}
-		return `<a class="symbol-link symbol-${symbol.kind}" href="${symbol.commandUri}" title="Go to ${escapeHtml(token)}"><code>${escapeHtml(token)}</code></a>`;
-	});
-
-	result = result.replace(/\x60([^\x60]+)\x60/g, (_whole, token: string) => {
-		const clean = token.trim();
-		const symbol = resolveSymbolForToken(clean, symbolMap);
-		const codeTag = `<code>${escapeHtml(clean)}</code>`;
-		if (!symbol) {
-			return codeTag;
-		}
-		return `<a class="symbol-link symbol-${symbol.kind}" href="${symbol.commandUri}" title="Go to ${escapeHtml(clean)}">${codeTag}</a>`;
-	});
-	result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-	result = linkPlainSymbolsInHtml(result, symbolLinks);
-	return result;
-}
-
-function resolveSymbolForToken(token: string, symbolMap: Map<string, SymbolLink[]>): SymbolLink | undefined {
-	const candidates = extractTokenCandidates(token);
-	for (const candidate of candidates) {
-		const direct = pickPreferredSymbol(symbolMap.get(candidate));
-		if (direct) {
-			return direct;
-		}
-	}
-
-	const lower = token.toLowerCase();
-	for (const [name, symbols] of symbolMap.entries()) {
-		if (name.toLowerCase() === lower) {
-			return pickPreferredSymbol(symbols);
-		}
-	}
-
-	return undefined;
-}
-
-function extractTokenCandidates(token: string): string[] {
-	const out: string[] = [];
-	const add = (value: string) => {
-		const v = value.trim();
-		if (v && !out.includes(v)) {
-			out.push(v);
-		}
-	};
-
-	add(token);
-	add(token.replace(/^[^\w$]+|[^\w$]+$/g, ''));
-
-	const identifierMatches = token.match(/[A-Za-z_$][\w$]*/g) ?? [];
-	for (const id of identifierMatches) {
-		add(id);
-	}
-
-	if (token.includes('.')) {
-		for (const part of token.split('.')) {
-			add(part);
-		}
-	}
-
-	return out;
-}
-
-function pickPreferredSymbol(symbols: SymbolLink[] | undefined): SymbolLink | undefined {
-	if (!symbols || symbols.length === 0) {
-		return undefined;
-	}
-	const order: Record<SymbolKind, number> = {
-		function: 0,
-		variable: 1,
-		import: 2
-	};
-	return [...symbols].sort((a, b) => order[a.kind] - order[b.kind])[0];
-}
-
-function linkPlainSymbolsInHtml(html: string, symbolLinks: SymbolLink[]): string {
-	if (!html || !symbolLinks.length) {
-		return html;
-	}
-
-	const symbolMap = new Map<string, SymbolLink>();
-	for (const symbol of symbolLinks) {
-		if (!symbolMap.has(symbol.name)) {
-			symbolMap.set(symbol.name, symbol);
-		}
-	}
-
-	const names = [...symbolMap.keys()]
-		.filter((name) => name.length >= 2)
-		.sort((a, b) => b.length - a.length);
-	if (!names.length) {
-		return html;
-	}
-
-	const escapedNames = names.map(escapeRegExp);
-	const pattern = new RegExp(`\\b(${escapedNames.join('|')})\\b`, 'g');
-
-	return html
-		.split(/(<[^>]+>)/g)
-		.map((part) => {
-			if (!part || part.startsWith('<')) {
-				return part;
-			}
-
-			return part.replace(pattern, (match: string) => {
-				const symbol = symbolMap.get(match);
-				if (!symbol) {
-					return match;
-				}
-				return `<a class="symbol-link symbol-${symbol.kind}" href="${symbol.commandUri}" title="Go to ${escapeHtml(match)}"><code>${escapeHtml(match)}</code></a>`;
-			});
-		})
-		.join('');
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function escapeHtml(value: string): string {
-	return value
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;')
-		.replace(/'/g, '&#39;');
 }

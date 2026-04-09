@@ -13,7 +13,9 @@
     "onCommand:mushroom-pce.start",
     "onCommand:mushroom-pce.analyzeActive",
     "onCommand:mushroom-pce.selectModel",
-    "onCommand:mushroom-pce.goToFunction"
+    "onCommand:mushroom-pce.goToFunction",
+    "onCommand:mushroom-pce.setListMode",
+    "onCommand:mushroom-pce.setDeveloperMode"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -33,6 +35,14 @@
       {
         "command": "mushroom-pce.goToFunction",
         "title": "Mushroom PCE: Go To Function"
+      },
+      {
+        "command": "mushroom-pce.setListMode",
+        "title": "Mushroom PCE: Set List Mode"
+      },
+      {
+        "command": "mushroom-pce.setDeveloperMode",
+        "title": "Mushroom PCE: Set Developer Mode"
       }
     ]
   },
