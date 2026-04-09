@@ -118,7 +118,7 @@ export class CircuitPanel {
   <div id="hud">
     <div class="card">
       <div class="title">Circuit Mode</div>
-      <div class="muted">Hover to highlight. Click for details. Scroll to zoom. Drag to orbit.</div>
+      <div class="muted">Hover to highlight. Drag nodes to rearrange. Space + drag to pan. Scroll to zoom.</div>
     </div>
     <div class="card" style="max-width: 520px;">
       <div class="title">Selection</div>
@@ -157,10 +157,18 @@ export class CircuitPanel {
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableRotate = false;
+    controls.enablePan = true;
     controls.enableDamping = true;
     controls.dampingFactor = 0.12;
     controls.screenSpacePanning = true;
     controls.zoomSpeed = 0.9;
+    controls.panSpeed = 1.2;
+    // Pan with right mouse (Node-RED vibe), zoom with wheel.
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.PAN
+    };
 
     const grid = new THREE.GridHelper(2400, 96, 0x1f2a44, 0x101a32);
     grid.rotation.x = Math.PI / 2;
@@ -537,6 +545,18 @@ export class CircuitPanel {
     let hoveredNodeId = null;
     let selectedNodeId = null;
     let dragging = null; // { nodeId, startX, startY, moved }
+    let spaceDown = false;
+
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        spaceDown = true;
+      }
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space') {
+        spaceDown = false;
+      }
+    });
 
     function onPointerMove(ev) {
       updatePointer(ev);
@@ -556,6 +576,21 @@ export class CircuitPanel {
 
     function onPointerDown(ev) {
       updatePointer(ev);
+
+      // Space+drag pans the canvas (even with left mouse).
+      if (spaceDown && ev.button === 0) {
+        controls.enabled = true;
+        const prev = controls.mouseButtons.LEFT;
+        controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+        // Restore after release.
+        const restore = () => {
+          controls.mouseButtons.LEFT = prev;
+          window.removeEventListener('pointerup', restore);
+        };
+        window.addEventListener('pointerup', restore);
+        return;
+      }
+
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(nodeBodies, false);
       const hit = hits[0] && hits[0].object ? hits[0].object : null;

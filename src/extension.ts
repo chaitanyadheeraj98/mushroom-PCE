@@ -5,6 +5,7 @@ import { MushroomPanel } from './panel';
 import { parseSymbolLocations } from './symbols';
 import { ModelOption, ResponseMode, SymbolLink } from './types';
 import { buildCircuitGraph } from './circuit/buildGraph';
+import { CircuitDetailsPanel } from './circuit/detailsPanel';
 import { CircuitPanel } from './circuit/panel';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -326,7 +327,10 @@ export function activate(context: vscode.ExtensionContext) {
 			if (!node?.uri || typeof node.line !== 'number' || typeof node.character !== 'number') {
 				return;
 			}
+			// 1) Jump to code in-place
 			await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
+			// 2) Show details webview (snippet)
+			await CircuitDetailsPanel.createOrShow(node);
 		});
 	});
 
