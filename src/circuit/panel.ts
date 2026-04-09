@@ -21,7 +21,9 @@ export class CircuitPanel {
 
 		const panel = vscode.window.createWebviewPanel('mushroomPceCircuit', 'Mushroom PCE: Circuit Mode', vscode.ViewColumn.Beside, {
 			enableScripts: true,
-			retainContextWhenHidden: true
+			retainContextWhenHidden: true,
+			// Allow loading Three.js from bundled deps.
+			localResourceRoots: [extensionUri, vscode.Uri.joinPath(extensionUri, 'node_modules')]
 		});
 
 		CircuitPanel.currentPanel = new CircuitPanel(panel, extensionUri, graph, onNavigate);
@@ -65,11 +67,18 @@ export class CircuitPanel {
 		const cspSource = webview.cspSource;
 		const graphJson = JSON.stringify(graph).replace(/</g, '\\u003c');
 
+		const threeUri = webview.asWebviewUri(
+			vscode.Uri.joinPath(extensionUri, 'node_modules', 'three', 'build', 'three.module.js')
+		);
+		const orbitUri = webview.asWebviewUri(
+			vscode.Uri.joinPath(extensionUri, 'node_modules', 'three', 'examples', 'jsm', 'controls', 'OrbitControls.js')
+		);
+
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' https:; connect-src https:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${cspSource};">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Circuit Mode</title>
   <style>
@@ -107,8 +116,16 @@ export class CircuitPanel {
   </div>
   <canvas id="canvas"></canvas>
   <script nonce="${nonce}" type="module">
-    import * as THREE from 'https://unpkg.com/three@0.163.0/build/three.module.js';
-    import { OrbitControls } from 'https://unpkg.com/three@0.163.0/examples/jsm/controls/OrbitControls.js';
+    let THREE;
+    let OrbitControls;
+    try {
+      THREE = await import('${threeUri}');
+      ({ OrbitControls } = await import('${orbitUri}'));
+    } catch (err) {
+      const details = document.getElementById('details');
+      details.textContent = 'Failed to load Three.js.\\n' + (err?.message ?? String(err));
+      throw err;
+    }
 
     const vscode = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : undefined;
     const canvas = document.getElementById('canvas');
