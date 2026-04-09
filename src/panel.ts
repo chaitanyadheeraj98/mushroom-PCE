@@ -343,6 +343,7 @@ export class MushroomPanel {
     <div class="toolbar">
       ${buttonHtml}
       <a class="fallback-link" href="command:mushroom-pce.analyzeActive">Analyze (fallback)</a>
+      <a class="fallback-link" href="command:mushroom-pce.openCircuit">Circuit Mode</a>
       <div class="hint">Update your code, then click Analyze.</div>
     </div>
     <div class="content">${explainHtml}</div>
@@ -351,4 +352,3 @@ export class MushroomPanel {
 </html>`;
 	}
 }
-

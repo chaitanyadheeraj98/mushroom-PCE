@@ -4,6 +4,8 @@ import { buildPrompt } from './prompts';
 import { MushroomPanel } from './panel';
 import { parseSymbolLocations } from './symbols';
 import { ModelOption, ResponseMode, SymbolLink } from './types';
+import { buildCircuitGraph } from './circuit/buildGraph';
+import { CircuitPanel } from './circuit/panel';
 
 export function activate(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
@@ -85,13 +87,13 @@ export function activate(context: vscode.ExtensionContext) {
 			return false;
 		}
 
-		// If user changed the file since the cached analysis, require re-analyze.
-		if (cached.docVersion !== doc.version) {
-			return false;
-		}
-
 		panel.setExplanation(cached.text);
-		panel.setStatus(`Cached (${selectedResponseMode}) at ${new Date(cached.updatedAt).toLocaleTimeString()}`);
+		const stale = cached.docVersion !== doc.version;
+		panel.setStatus(
+			stale
+				? `Cached (stale: file changed) (${selectedResponseMode}) at ${new Date(cached.updatedAt).toLocaleTimeString()}`
+				: `Cached (${selectedResponseMode}) at ${new Date(cached.updatedAt).toLocaleTimeString()}`
+		);
 		return true;
 	};
 
@@ -312,6 +314,22 @@ export function activate(context: vscode.ExtensionContext) {
 		output.appendLine('response mode selected: developer');
 	});
 
+	const openCircuitCommand = vscode.commands.registerCommand('mushroom-pce.openCircuit', async () => {
+		const doc = getCurrentDocument();
+		if (!doc) {
+			vscode.window.showInformationMessage('Open a file to visualize in Circuit Mode.');
+			return;
+		}
+
+		const graph = buildCircuitGraph(doc);
+		CircuitPanel.createOrShow(context.extensionUri, graph, async (node) => {
+			if (!node?.uri || typeof node.line !== 'number' || typeof node.character !== 'number') {
+				return;
+			}
+			await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
+		});
+	});
+
 	const statusBarAnalyze = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 	statusBarAnalyze.text = '$(sparkle) PCE Analyze';
 	statusBarAnalyze.tooltip = 'Analyze active file with Mushroom PCE';
@@ -350,6 +368,7 @@ export function activate(context: vscode.ExtensionContext) {
 		setListModeCommand,
 		setDeveloperModeCommand,
 		goToFunctionCommand,
+		openCircuitCommand,
 		statusBarAnalyze,
 		output,
 		onEditorChange,

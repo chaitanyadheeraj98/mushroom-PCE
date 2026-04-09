@@ -15,7 +15,8 @@
     "onCommand:mushroom-pce.selectModel",
     "onCommand:mushroom-pce.goToFunction",
     "onCommand:mushroom-pce.setListMode",
-    "onCommand:mushroom-pce.setDeveloperMode"
+    "onCommand:mushroom-pce.setDeveloperMode",
+    "onCommand:mushroom-pce.openCircuit"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -43,6 +44,10 @@
       {
         "command": "mushroom-pce.setDeveloperMode",
         "title": "Mushroom PCE: Set Developer Mode"
+      },
+      {
+        "command": "mushroom-pce.openCircuit",
+        "title": "Mushroom PCE: Open Circuit Mode"
       }
     ]
   },
