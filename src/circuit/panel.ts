@@ -118,7 +118,7 @@ export class CircuitPanel {
   <div id="hud">
     <div class="card">
       <div class="title">Circuit Mode</div>
-      <div class="muted">Hover to highlight. Drag nodes to rearrange. Space + drag to pan. Scroll to zoom.</div>
+      <div class="muted">Double-click to toggle Hand mode (pan). Drag nodes to rearrange. Scroll to zoom.</div>
     </div>
     <div class="card" style="max-width: 520px;">
       <div class="title">Selection</div>
@@ -157,18 +157,14 @@ export class CircuitPanel {
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableRotate = false;
-    controls.enablePan = true;
+    // We'll handle panning ourselves so it works consistently in VS Code webviews.
+    controls.enablePan = false;
     controls.enableDamping = true;
     controls.dampingFactor = 0.12;
     controls.screenSpacePanning = true;
     controls.zoomSpeed = 0.9;
-    controls.panSpeed = 1.2;
-    // Pan with right mouse (Node-RED vibe), zoom with wheel.
-    controls.mouseButtons = {
-      LEFT: THREE.MOUSE.ROTATE,
-      MIDDLE: THREE.MOUSE.DOLLY,
-      RIGHT: THREE.MOUSE.PAN
-    };
+    // Disable built-in mouse bindings; we manage drag behaviors.
+    controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
 
     const grid = new THREE.GridHelper(2400, 96, 0x1f2a44, 0x101a32);
     grid.rotation.x = Math.PI / 2;
@@ -545,18 +541,27 @@ export class CircuitPanel {
     let hoveredNodeId = null;
     let selectedNodeId = null;
     let dragging = null; // { nodeId, startX, startY, moved }
-    let spaceDown = false;
 
-    window.addEventListener('keydown', (e) => {
-      if (e.code === 'Space') {
-        spaceDown = true;
+    // Hand mode (pan) like Node-RED: double-click toggles.
+    let handMode = false;
+    let panning = null; // { startX, startY, camX, camY, targetX, targetY }
+
+    function setCursor() {
+      if (panning) {
+        canvas.style.cursor = 'grabbing';
+        return;
       }
-    });
-    window.addEventListener('keyup', (e) => {
-      if (e.code === 'Space') {
-        spaceDown = false;
+      if (handMode) {
+        canvas.style.cursor = 'grab';
+        return;
       }
-    });
+      canvas.style.cursor = '';
+    }
+
+    function toggleHandMode() {
+      handMode = !handMode;
+      setCursor();
+    }
 
     function onPointerMove(ev) {
       updatePointer(ev);
@@ -571,25 +576,28 @@ export class CircuitPanel {
             dragging.moved = true;
           }
         }
+        return;
+      }
+
+      if (panning) {
+        const dx = ev.clientX - panning.startX;
+        const dy = ev.clientY - panning.startY;
+
+        // Convert screen delta to world units using the ortho frustum size.
+        const rect = canvas.getBoundingClientRect();
+        const worldPerPxX = (camera.right - camera.left) / Math.max(1, rect.width);
+        const worldPerPxY = (camera.top - camera.bottom) / Math.max(1, rect.height);
+
+        camera.position.x = panning.camX - dx * worldPerPxX;
+        camera.position.y = panning.camY + dy * worldPerPxY;
+        controls.target.x = panning.targetX - dx * worldPerPxX;
+        controls.target.y = panning.targetY + dy * worldPerPxY;
+        return;
       }
     }
 
     function onPointerDown(ev) {
       updatePointer(ev);
-
-      // Space+drag pans the canvas (even with left mouse).
-      if (spaceDown && ev.button === 0) {
-        controls.enabled = true;
-        const prev = controls.mouseButtons.LEFT;
-        controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
-        // Restore after release.
-        const restore = () => {
-          controls.mouseButtons.LEFT = prev;
-          window.removeEventListener('pointerup', restore);
-        };
-        window.addEventListener('pointerup', restore);
-        return;
-      }
 
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(nodeBodies, false);
@@ -598,6 +606,23 @@ export class CircuitPanel {
         const nodeId = hit.userData.nodeId;
         dragging = { nodeId: nodeId, moved: false };
         controls.enabled = false;
+        canvas.setPointerCapture?.(ev.pointerId);
+        setCursor();
+        return;
+      }
+
+      // Pan background if Hand mode enabled (left mouse).
+      if (handMode && ev.button === 0) {
+        panning = {
+          startX: ev.clientX,
+          startY: ev.clientY,
+          camX: camera.position.x,
+          camY: camera.position.y,
+          targetX: controls.target.x,
+          targetY: controls.target.y
+        };
+        canvas.setPointerCapture?.(ev.pointerId);
+        setCursor();
       }
     }
 
@@ -618,11 +643,25 @@ export class CircuitPanel {
           }
         }
       }
+      if (panning) {
+        panning = null;
+        setCursor();
+      }
     }
 
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('dblclick', (ev) => {
+      // Only toggle when double-clicking on background (not on a node).
+      updatePointer(ev);
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(nodeBodies, false);
+      if (hits && hits.length) {
+        return;
+      }
+      toggleHandMode();
+    });
     window.addEventListener('resize', resize);
 
     window.addEventListener('message', (event) => {
@@ -645,6 +684,7 @@ export class CircuitPanel {
       camera.bottom = -viewHeight / 2;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h, false);
+      setCursor();
     }
 
     function animate() {
