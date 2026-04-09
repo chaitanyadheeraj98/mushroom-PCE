@@ -70,9 +70,12 @@ export class CircuitPanel {
 		const threeUri = webview.asWebviewUri(
 			vscode.Uri.joinPath(extensionUri, 'node_modules', 'three', 'build', 'three.module.js')
 		);
-		const orbitUri = webview.asWebviewUri(
-			vscode.Uri.joinPath(extensionUri, 'node_modules', 'three', 'examples', 'jsm', 'controls', 'OrbitControls.js')
-		);
+		let jsmBaseUri = webview
+			.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'node_modules', 'three', 'examples', 'jsm'))
+			.toString();
+		if (!jsmBaseUri.endsWith('/')) {
+			jsmBaseUri += '/';
+		}
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -81,6 +84,14 @@ export class CircuitPanel {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${cspSource};">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Circuit Mode</title>
+  <script nonce="${nonce}" type="importmap">
+    {
+      "imports": {
+        "three": "${threeUri}",
+        "three/examples/jsm/": "${jsmBaseUri}"
+      }
+    }
+  </script>
   <style>
     html, body { height: 100%; }
     body { margin: 0; overflow: hidden; background: #070b18; color: #e2e8f0; font-family: Segoe UI, Tahoma, sans-serif; }
@@ -119,8 +130,8 @@ export class CircuitPanel {
     let THREE;
     let OrbitControls;
     try {
-      THREE = await import('${threeUri}');
-      ({ OrbitControls } = await import('${orbitUri}'));
+      THREE = await import('three');
+      ({ OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js'));
     } catch (err) {
       const details = document.getElementById('details');
       details.textContent = 'Failed to load Three.js.\\n' + (err?.message ?? String(err));
