@@ -204,9 +204,17 @@ export class CircuitPanel {
     const particleGroup = new THREE.Group();
     scene.add(edgeGroup, particleGroup, labelGroup, nodeGroup);
 
+    const NODE_W = 228;
+    const NODE_H = 64;
+    const NODE_HEADER_H = 18;
+    const NODE_ICON_W = 24;
+    const NODE_ICON_H = 24;
+    const NODE_BODY_COLOR = 0x132238;
+    const NODE_HEADER_COLOR = 0x1d3656;
+    const NODE_ACCENT_COLOR = 0x7dd3fc;
     const palette = {
-      function: 0x60a5fa,
-      sink: 0xf97316
+      function: NODE_ACCENT_COLOR,
+      sink: 0xfbbf24
     };
     const portColors = {
       in: 0xa78bfa,   // purple
@@ -234,8 +242,13 @@ export class CircuitPanel {
 
     function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
+    function fitLabel(text, maxChars) {
+      if (!text || text.length <= maxChars) return text;
+      return text.slice(0, Math.max(0, maxChars - 1)) + '…';
+    }
+
     function makeLabelSprite(text, colorHex) {
-      const padX = 14;
+      const padX = 10;
       const padY = 8;
       const font = '600 14px Segoe UI, Tahoma, sans-serif';
 
@@ -245,7 +258,7 @@ export class CircuitPanel {
       const metrics = ctx.measureText(text);
       const w = Math.ceil(metrics.width + padX * 2);
       const h = 26 + padY;
-      canvasEl.width = clamp(w, 120, 320);
+      canvasEl.width = clamp(w, 120, 180);
       canvasEl.height = h;
 
       ctx.font = font;
@@ -326,9 +339,9 @@ export class CircuitPanel {
       for (let li = 0; li < lanes.length; li++) {
         const type = lanes[li];
         const lane = byType.get(type) || [];
-        const x = (li - (lanes.length - 1) / 2) * 280;
+          const x = (li - (lanes.length - 1) / 2) * 340;
         for (let i = 0; i < lane.length; i++) {
-          const y = (-(i - (lane.length - 1) / 2)) * 90;
+          const y = (-(i - (lane.length - 1) / 2)) * 114;
           positions.set(lane[i].id, new THREE.Vector3(x, y, 0));
         }
       }
@@ -346,47 +359,57 @@ export class CircuitPanel {
       const positions = layoutNodes(g.nodes);
 
       const portGeom = new THREE.SphereGeometry(5.2, 14, 14);
-      const bodyGeom = new THREE.BoxGeometry(180, 54, 8);
-      const headerGeom = new THREE.BoxGeometry(180, 16, 9);
-      const iconGeom = new THREE.BoxGeometry(26, 26, 10);
+      const iconGeom = new THREE.BoxGeometry(NODE_ICON_W, NODE_ICON_H, 10);
 
       for (const node of g.nodes) {
         const color = palette[node.type] || 0x94a3b8;
-        const labelText = node.label;
-        const w = clamp(110 + labelText.length * 7, 160, 320);
-        const h = 54;
+        const labelText = fitLabel(node.label, 22);
+        const w = NODE_W;
+        const h = NODE_H;
 
         const group = new THREE.Group();
         group.position.copy(positions.get(node.id));
         group.userData.kind = 'nodeGroup';
 
         const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, 8), new THREE.MeshStandardMaterial({
-          color: 0x0f172a,
-          roughness: 0.85,
-          metalness: 0.05,
-          emissive: 0x000000
+          color: NODE_BODY_COLOR,
+          roughness: 0.62,
+          metalness: 0.08,
+          emissive: 0x08111f,
+          emissiveIntensity: 0.18
         }));
         body.userData.kind = 'nodeBody';
         body.userData.nodeId = node.id;
 
-        const header = new THREE.Mesh(new THREE.BoxGeometry(w, 16, 9), new THREE.MeshStandardMaterial({
-          color: 0x111c35,
-          roughness: 0.9,
-          metalness: 0.05,
-          emissive: 0x000000
+        const header = new THREE.Mesh(new THREE.BoxGeometry(w, NODE_HEADER_H, 9), new THREE.MeshStandardMaterial({
+          color: NODE_HEADER_COLOR,
+          roughness: 0.55,
+          metalness: 0.1,
+          emissive: 0x0b1830,
+          emissiveIntensity: 0.12
         }));
-        header.position.set(0, (h / 2) - 8, 0.6);
+        header.position.set(0, (h / 2) - (NODE_HEADER_H / 2), 0.6);
 
         const icon = new THREE.Mesh(iconGeom, new THREE.MeshStandardMaterial({
           color: color,
-          roughness: 0.35,
-          metalness: 0.08,
-          emissive: 0x000000
+          roughness: 0.28,
+          metalness: 0.18,
+          emissive: color,
+          emissiveIntensity: 0.14
         }));
         icon.position.set((-w / 2) + 18, 0, 0.8);
 
+        const accent = new THREE.Mesh(new THREE.BoxGeometry(6, h, 9.2), new THREE.MeshStandardMaterial({
+          color: color,
+          roughness: 0.35,
+          metalness: 0.12,
+          emissive: color,
+          emissiveIntensity: 0.18
+        }));
+        accent.position.set((-w / 2) + 3, 0, 0.7);
+
         const label = makeLabelSprite(labelText);
-        label.position.set((-w / 2) + 42 + Math.min(130, label.scale.x * 0.15), 0, 6.5);
+        label.position.set((-w / 2) + 80, 0, 6.5);
 
         const inputs = Array.isArray(node.inputs) ? node.inputs : [];
         const outputs = Array.isArray(node.outputs) ? node.outputs : [];
@@ -408,8 +431,8 @@ export class CircuitPanel {
         };
 
         // Distribute ports along left/right edge.
-        const portSpan = h - 18;
-        const portStart = (h / 2) - 9;
+        const portSpan = h - 22;
+        const portStart = (h / 2) - 11;
         for (let i = 0; i < inputs.length; i++) {
           const t = (inputs.length === 1) ? 0.5 : (i / (inputs.length - 1));
           const y = portStart - t * portSpan;
@@ -429,7 +452,7 @@ export class CircuitPanel {
           group.add(p);
         }
 
-        group.add(body, header, icon, label);
+        group.add(body, header, accent, icon, label);
         nodeGroup.add(group);
         nodeBodies.push(body);
         nodeByMeshUuid.set(body.uuid, node);
