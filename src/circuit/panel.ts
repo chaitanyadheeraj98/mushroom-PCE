@@ -5,8 +5,11 @@ import { CircuitGraph, CircuitNode } from './types';
 export class CircuitPanel {
 	private static currentPanel: CircuitPanel | undefined;
 	private readonly panel: vscode.WebviewPanel;
+	private readonly extensionUri: vscode.Uri;
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly onNavigate?: (node: CircuitNode) => Promise<void>;
+	private graph: CircuitGraph;
+	private readonly isPrimaryPanel: boolean;
 
 	static createOrShow(
 		extensionUri: vscode.Uri,
@@ -26,7 +29,9 @@ export class CircuitPanel {
 			localResourceRoots: [extensionUri, vscode.Uri.joinPath(extensionUri, 'node_modules')]
 		});
 
-		CircuitPanel.currentPanel = new CircuitPanel(panel, extensionUri, graph, onNavigate);
+		CircuitPanel.currentPanel = new CircuitPanel(panel, extensionUri, graph, onNavigate, {
+			isPrimaryPanel: true
+		});
 		return CircuitPanel.currentPanel;
 	}
 
@@ -34,38 +39,75 @@ export class CircuitPanel {
 		panel: vscode.WebviewPanel,
 		extensionUri: vscode.Uri,
 		graph: CircuitGraph,
-		onNavigate?: (node: CircuitNode) => Promise<void>
+		onNavigate?: (node: CircuitNode) => Promise<void>,
+		options?: { initialSkeletonRootNodeId?: string; initialViewMode?: 'architecture' | 'runtime'; isPrimaryPanel?: boolean }
 	) {
 		this.panel = panel;
+		this.extensionUri = extensionUri;
+		this.graph = graph;
 		this.onNavigate = onNavigate;
+		this.isPrimaryPanel = options?.isPrimaryPanel ?? false;
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 		this.panel.webview.onDidReceiveMessage(
 			async (msg) => {
 				if (msg?.type === 'navigate' && msg?.node && this.onNavigate) {
 					await this.onNavigate(msg.node as CircuitNode);
+					return;
+				}
+				if (msg?.type === 'openSkeleton' && typeof msg?.nodeId === 'string') {
+					this.openSkeletonPanel(msg.nodeId, typeof msg?.label === 'string' ? msg.label : undefined);
 				}
 			},
 			null,
 			this.disposables
 		);
-		this.panel.webview.html = this.getHtml(this.panel.webview, extensionUri, graph);
+		this.panel.webview.html = this.getHtml(this.panel.webview, extensionUri, graph, {
+			initialSkeletonRootNodeId: options?.initialSkeletonRootNodeId,
+			initialViewMode: options?.initialViewMode
+		});
 	}
 
 	dispose(): void {
-		CircuitPanel.currentPanel = undefined;
+		if (this.isPrimaryPanel && CircuitPanel.currentPanel === this) {
+			CircuitPanel.currentPanel = undefined;
+		}
 		while (this.disposables.length) {
 			this.disposables.pop()?.dispose();
 		}
 	}
 
 	setGraph(graph: CircuitGraph): void {
+		this.graph = graph;
 		this.panel.webview.postMessage({ type: 'graph', graph });
 	}
 
-	private getHtml(webview: vscode.Webview, extensionUri: vscode.Uri, graph: CircuitGraph): string {
+	private openSkeletonPanel(rootNodeId: string, nodeLabel?: string): void {
+		const title = nodeLabel
+			? `Mushroom PCE: Skeleton - ${nodeLabel}`
+			: 'Mushroom PCE: Skeleton';
+		const panel = vscode.window.createWebviewPanel('mushroomPceCircuitSkeleton', title, vscode.ViewColumn.Beside, {
+			enableScripts: true,
+			retainContextWhenHidden: true,
+			localResourceRoots: [this.extensionUri, vscode.Uri.joinPath(this.extensionUri, 'node_modules')]
+		});
+		new CircuitPanel(panel, this.extensionUri, this.graph, this.onNavigate, {
+			initialSkeletonRootNodeId: rootNodeId,
+			initialViewMode: 'runtime',
+			isPrimaryPanel: false
+		});
+	}
+
+	private getHtml(
+		webview: vscode.Webview,
+		extensionUri: vscode.Uri,
+		graph: CircuitGraph,
+		options?: { initialSkeletonRootNodeId?: string; initialViewMode?: 'architecture' | 'runtime' }
+	): string {
 		const nonce = getNonce();
 		const cspSource = webview.cspSource;
 		const graphJson = JSON.stringify(graph).replace(/</g, '\\u003c');
+		const initialSkeletonRootNodeIdJson = JSON.stringify(options?.initialSkeletonRootNodeId ?? null);
+		const initialViewModeJson = JSON.stringify(options?.initialViewMode ?? null);
 
 		const threeUri = webview.asWebviewUri(
 			vscode.Uri.joinPath(extensionUri, 'node_modules', 'three', 'build', 'three.module.js')
@@ -98,6 +140,40 @@ export class CircuitPanel {
     #hud {
       position: absolute; top: 12px; left: 12px; right: 12px;
       display: flex; justify-content: space-between; gap: 12px; pointer-events: none;
+    }
+    #hudControls {
+      pointer-events: auto;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      align-self: flex-start;
+    }
+    .hud-control-btn {
+      border: 1px solid rgba(33, 48, 77, 0.95);
+      background: rgba(11, 18, 37, 0.86);
+      color: #cbd5e1;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 6px 10px;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    .hud-control-btn.active {
+      border-color: rgba(34, 197, 94, 0.9);
+      background: rgba(22, 163, 74, 0.26);
+      color: #dcfce7;
+    }
+    body.hud-minimized #hud .hud-main-card,
+    body.hud-minimized #hud .hud-selection-card {
+      display: none;
+    }
+    body.hud-maximized #hud .card {
+      max-width: 620px;
+      padding: 12px 14px;
+    }
+    body.hud-maximized #hud .hud-selection-card {
+      max-width: 760px;
     }
     .card {
       pointer-events: none;
@@ -164,11 +240,43 @@ export class CircuitPanel {
     #portTip.show { opacity: 1; transform: translateY(0); }
     #portTip .k { color: #9fb0cc; }
     #portTip .v { color: #e2e8f0; font-weight: 600; }
+    #nodeMenu {
+      position: absolute;
+      min-width: 120px;
+      border-radius: 10px;
+      border: 1px solid rgba(33, 48, 77, 0.95);
+      background: rgba(15, 23, 42, 0.9);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+      backdrop-filter: blur(8px);
+      padding: 6px;
+      display: none;
+      z-index: 99;
+    }
+    #nodeMenu button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: #e2e8f0;
+      font-size: 12px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    #nodeMenu button:hover {
+      background: rgba(34, 197, 94, 0.15);
+      border-color: rgba(34, 197, 94, 0.35);
+    }
   </style>
 </head>
 <body>
   <div id="hud">
-    <div class="card">
+    <div id="hudControls" class="card">
+      <button id="hudMinBtn" class="hud-control-btn">Minimize HUD</button>
+      <button id="hudMaxBtn" class="hud-control-btn">Maximize HUD</button>
+    </div>
+    <div class="card hud-main-card">
       <div class="title">Circuit Mode</div>
       <div class="muted">Double-click to toggle Hand mode (pan). Drag nodes to rearrange. Scroll to zoom. In Architecture view, click a layer node to collapse/expand it.</div>
       <div class="mode-row">
@@ -181,12 +289,13 @@ export class CircuitPanel {
       </div>
       <div id="modeHint">Architecture view: grouped by layers.</div>
     </div>
-    <div class="card" style="max-width: 520px;">
+    <div class="card hud-selection-card" style="max-width: 520px;">
       <div class="title">Selection</div>
       <div id="details" class="muted">None</div>
     </div>
   </div>
   <div id="portTip"></div>
+  <div id="nodeMenu"></div>
   <canvas id="canvas"></canvas>
   <script nonce="${nonce}" type="module">
     let THREE;
@@ -204,19 +313,28 @@ export class CircuitPanel {
     const canvas = document.getElementById('canvas');
     const details = document.getElementById('details');
     const portTip = document.getElementById('portTip');
+    const nodeMenu = document.getElementById('nodeMenu');
     const modeArchitectureBtn = document.getElementById('modeArchitecture');
     const modeRuntimeBtn = document.getElementById('modeRuntime');
     const collapseAllBtn = document.getElementById('collapseAllBtn');
     const expandAllBtn = document.getElementById('expandAllBtn');
     const modeHint = document.getElementById('modeHint');
+    const hudMinBtn = document.getElementById('hudMinBtn');
+    const hudMaxBtn = document.getElementById('hudMaxBtn');
 
     let graph = ${graphJson};
-    let viewMode = 'architecture'; // architecture | runtime
+    const initialViewMode = ${initialViewModeJson};
+    let viewMode = (initialViewMode === 'architecture' || initialViewMode === 'runtime') ? initialViewMode : 'architecture'; // architecture | runtime
     const collapsedLayers = new Set();
+    let skeletonRootNodeId = ${initialSkeletonRootNodeIdJson};
+    let skeletonNodeIds = null; // Set<string> | null
+    let menuNodeId = null;
+    let hudMinimized = false;
+    let hudMaximized = false;
 
     try {
       const saved = vscode?.getState?.();
-      if (saved && (saved.viewMode === 'architecture' || saved.viewMode === 'runtime')) {
+      if (!initialViewMode && saved && (saved.viewMode === 'architecture' || saved.viewMode === 'runtime')) {
         viewMode = saved.viewMode;
       }
       if (saved && Array.isArray(saved.collapsedLayers)) {
@@ -227,6 +345,8 @@ export class CircuitPanel {
           }
         }
       }
+      hudMinimized = !!saved?.hudMinimized;
+      hudMaximized = !!saved?.hudMaximized;
     } catch {}
 
     // Node-RED style 2D node graph (boxes + ports) on the Z=0 plane.
@@ -464,7 +584,8 @@ export class CircuitPanel {
       return count;
     }
 
-    function getVisibleGraph(g) {
+    function getVisibleGraph(g, skeletonOverride = undefined) {
+      const activeSkeleton = skeletonOverride === undefined ? skeletonNodeIds : skeletonOverride;
       const visibleNodes = [];
       const allowedNodeIds = new Set();
       for (let i = 0; i < g.nodes.length; i++) {
@@ -472,7 +593,11 @@ export class CircuitPanel {
         const includeInArchitecture = node.type === 'layer' || node.type === 'function';
         const includeInRuntime = node.type === 'function' || node.type === 'sink';
         const layerCollapsed = viewMode === 'architecture' && node.type === 'function' && node.layer && collapsedLayers.has(node.layer);
-        const shouldInclude = (viewMode === 'architecture' ? includeInArchitecture : includeInRuntime) && !layerCollapsed;
+        const inSkeleton = !activeSkeleton || activeSkeleton.has(node.id);
+        const shouldInclude =
+          (viewMode === 'architecture' ? includeInArchitecture : includeInRuntime) &&
+          !layerCollapsed &&
+          inSkeleton;
         if (shouldInclude) {
           visibleNodes.push(node);
           allowedNodeIds.add(node.id);
@@ -757,7 +882,19 @@ export class CircuitPanel {
         nodeGroup.add(group);
         nodeBodies.push(body);
         nodeByMeshUuid.set(body.uuid, node);
-        nodeMeta.set(node.id, { group: group, body: body, w: w, h: h, ports: ports, node: node });
+        nodeMeta.set(node.id, {
+          group: group,
+          body: body,
+          header: header,
+          accent: accent,
+          icon: icon,
+          label: label,
+          baseColor: color,
+          w: w,
+          h: h,
+          ports: ports,
+          node: node
+        });
         const targetScale = 1;
         const startScale = previous ? previous.scale : (isArchitectureMode ? 0.86 : 0.92);
         group.scale.setScalar(startScale);
@@ -919,6 +1056,7 @@ export class CircuitPanel {
         'label: ' + node.label,
         'type: ' + node.type,
         node.layer ? 'layer: ' + node.layer : null,
+        skeletonRootNodeId ? 'skeleton: active' : null,
         collapseKey ? ('collapsed: ' + (isCollapsed ? 'yes' : 'no')) : null,
         node.detail ? 'detail: ' + node.detail : null,
         typeof node.line === 'number' ? 'line: ' + (node.line + 1) : null,
@@ -926,11 +1064,64 @@ export class CircuitPanel {
       ].filter(Boolean).join('\\n');
     }
 
-    function setNodeHighlight(nodeId, enabled) {
+    function setNodeHighlight(nodeId, mode = 'off') {
       const meta = nodeMeta.get(nodeId);
       if (!meta) return;
-      meta.body.material.emissive.setHex(enabled ? 0x1b3a77 : 0x000000);
-      meta.body.material.color.setHex(enabled ? 0x172554 : 0x0f172a);
+      const bodyMat = meta.body.material;
+      const headerMat = meta.header?.material;
+      const accentMat = meta.accent?.material;
+      const iconMat = meta.icon?.material;
+
+      if (mode === 'off') {
+        bodyMat.color.setHex(NODE_BODY_COLOR);
+        bodyMat.emissive.setHex(0x08111f);
+        bodyMat.emissiveIntensity = 0.18;
+        if (headerMat) {
+          headerMat.color.setHex(NODE_HEADER_COLOR);
+          headerMat.emissive.setHex(0x0b1830);
+          headerMat.emissiveIntensity = 0.12;
+        }
+        if (accentMat) {
+          accentMat.color.setHex(meta.baseColor || NODE_ACCENT_COLOR);
+          accentMat.emissive.setHex(meta.baseColor || NODE_ACCENT_COLOR);
+          accentMat.emissiveIntensity = 0.18;
+        }
+        if (iconMat) {
+          iconMat.color.setHex(meta.baseColor || NODE_ACCENT_COLOR);
+          iconMat.emissive.setHex(meta.baseColor || NODE_ACCENT_COLOR);
+          iconMat.emissiveIntensity = 0.14;
+        }
+        if (meta.label && meta.label.material) {
+          meta.label.material.opacity = 0.95;
+          meta.label.material.color.setHex(0xffffff);
+        }
+        return;
+      }
+
+      const linked = mode === 'linked';
+      const focus = mode === 'focus';
+      bodyMat.color.setHex(focus ? 0x1e3a8a : 0x172554);
+      bodyMat.emissive.setHex(focus ? 0x2c5ed3 : 0x1b3a77);
+      bodyMat.emissiveIntensity = focus ? 0.62 : 0.4;
+      if (headerMat) {
+        headerMat.color.setHex(focus ? 0x2563eb : 0x1d4ed8);
+        headerMat.emissive.setHex(focus ? 0x3b82f6 : 0x2563eb);
+        headerMat.emissiveIntensity = focus ? 0.42 : 0.28;
+      }
+      if (accentMat) {
+        accentMat.color.setHex(focus ? 0x22c55e : 0x4ade80);
+        accentMat.emissive.setHex(focus ? 0x22c55e : 0x4ade80);
+        accentMat.emissiveIntensity = focus ? 0.48 : 0.3;
+      }
+      if (iconMat) {
+        iconMat.color.setHex(linked ? 0x86efac : 0xbbf7d0);
+        iconMat.emissive.setHex(linked ? 0x86efac : 0xbbf7d0);
+        iconMat.emissiveIntensity = focus ? 0.5 : 0.28;
+      }
+      if (meta.label && meta.label.material) {
+        meta.label.material.opacity = focus ? 1 : 0.98;
+        meta.label.material.color.setHex(focus ? 0xffffff : 0xe2e8f0);
+      }
     }
 
     function updatePointer(ev) {
@@ -942,6 +1133,9 @@ export class CircuitPanel {
     let hoveredNodeId = null;
     let selectedNodeId = null;
     let dragging = null; // { nodeId, startX, startY, moved }
+    if (skeletonRootNodeId) {
+      selectedNodeId = skeletonRootNodeId;
+    }
 
     // Hand mode (pan) like Node-RED: double-click toggles.
     let handMode = false;
@@ -964,6 +1158,48 @@ export class CircuitPanel {
       setCursor();
     }
 
+    function persistUiState() {
+      try {
+        vscode?.setState?.({
+          viewMode: viewMode,
+          collapsedLayers: Array.from(collapsedLayers),
+          hudMinimized: hudMinimized,
+          hudMaximized: hudMaximized
+        });
+      } catch {}
+    }
+
+    function applyHudState() {
+      document.body.classList.toggle('hud-minimized', hudMinimized);
+      document.body.classList.toggle('hud-maximized', hudMaximized);
+      if (hudMinBtn) {
+        hudMinBtn.textContent = hudMinimized ? 'Show HUD' : 'Minimize HUD';
+        hudMinBtn.classList.toggle('active', hudMinimized);
+      }
+      if (hudMaxBtn) {
+        hudMaxBtn.textContent = hudMaximized ? 'Normal HUD' : 'Maximize HUD';
+        hudMaxBtn.classList.toggle('active', hudMaximized);
+        hudMaxBtn.disabled = hudMinimized;
+      }
+      persistUiState();
+    }
+
+    function toggleHudMinimized() {
+      hudMinimized = !hudMinimized;
+      if (hudMinimized) {
+        hudMaximized = false;
+      }
+      applyHudState();
+    }
+
+    function toggleHudMaximized() {
+      if (hudMinimized) {
+        hudMinimized = false;
+      }
+      hudMaximized = !hudMaximized;
+      applyHudState();
+    }
+
     function updateModeUi() {
       if (modeArchitectureBtn) {
         modeArchitectureBtn.classList.toggle('active', viewMode === 'architecture');
@@ -983,9 +1219,7 @@ export class CircuitPanel {
       if (expandAllBtn) {
         expandAllBtn.disabled = viewMode !== 'architecture';
       }
-      try {
-        vscode?.setState?.({ viewMode: viewMode, collapsedLayers: Array.from(collapsedLayers) });
-      } catch {}
+      persistUiState();
     }
 
     function collapseAllLayers() {
@@ -1085,6 +1319,7 @@ export class CircuitPanel {
     }
 
     function onPointerDown(ev) {
+      hideNodeMenu();
       updatePointer(ev);
 
       // If clicking a port, show tooltip (no navigation).
@@ -1106,6 +1341,10 @@ export class CircuitPanel {
       const hit = hits[0] && hits[0].object ? hits[0].object : null;
       if (hit && hit.userData && hit.userData.nodeId) {
         const nodeId = hit.userData.nodeId;
+        if (ev.button === 2) {
+          showNodeMenu(ev.clientX, ev.clientY, nodeId);
+          return;
+        }
         for (let i = nodeAnimations.length - 1; i >= 0; i--) {
           if (nodeAnimations[i].nodeId === nodeId) {
             nodeAnimations.splice(i, 1);
@@ -1179,17 +1418,32 @@ export class CircuitPanel {
 
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      updatePointer(ev);
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(nodeBodies, false);
+      const hit = hits[0] && hits[0].object ? hits[0].object : null;
+      if (hit && hit.userData && hit.userData.nodeId) {
+        showNodeMenu(ev.clientX, ev.clientY, hit.userData.nodeId);
+      } else {
+        hideNodeMenu();
+      }
+    });
     window.addEventListener('pointerup', onPointerUp);
     modeArchitectureBtn?.addEventListener('click', () => setViewMode('architecture'));
     modeRuntimeBtn?.addEventListener('click', () => setViewMode('runtime'));
     collapseAllBtn?.addEventListener('click', collapseAllLayers);
     expandAllBtn?.addEventListener('click', expandAllLayers);
+    hudMinBtn?.addEventListener('click', toggleHudMinimized);
+    hudMaxBtn?.addEventListener('click', toggleHudMaximized);
     canvas.addEventListener('dblclick', (ev) => {
-      // Only toggle when double-clicking on background (not on a node).
+      // If double-clicking a node, open node menu (Skeleton / Unskeleton).
       updatePointer(ev);
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(nodeBodies, false);
-      if (hits && hits.length) {
+      if (hits && hits.length && hits[0].object?.userData?.nodeId) {
+        showNodeMenu(ev.clientX, ev.clientY, hits[0].object.userData.nodeId);
         return;
       }
       toggleHandMode();
@@ -1259,6 +1513,90 @@ export class CircuitPanel {
       portTip.classList.remove('show');
     }
 
+    function hideNodeMenu() {
+      if (!nodeMenu) return;
+      nodeMenu.style.display = 'none';
+      nodeMenu.textContent = '';
+      menuNodeId = null;
+    }
+
+    function getSkeletonSet(rootNodeId) {
+      // Skeleton = focused node + one-hop incoming/outgoing neighbors.
+      const visible = getVisibleGraph(graph, null);
+      const result = new Set([rootNodeId]);
+      for (let i = 0; i < visible.edges.length; i++) {
+        const e = visible.edges[i];
+        if (e.from === rootNodeId || e.to === rootNodeId) {
+          result.add(e.from);
+          result.add(e.to);
+        }
+      }
+      return result;
+    }
+
+    function enableSkeleton(rootNodeId) {
+      skeletonRootNodeId = rootNodeId;
+      skeletonNodeIds = getSkeletonSet(rootNodeId);
+      buildGraphScene(graph);
+      const node = nodeMeta.get(rootNodeId)?.node;
+      if (node) setDetails(node);
+    }
+
+    function disableSkeleton() {
+      skeletonRootNodeId = null;
+      skeletonNodeIds = null;
+      buildGraphScene(graph);
+      setDetails(null);
+    }
+
+    function showNodeMenu(x, y, nodeId) {
+      if (!nodeMenu) {
+        return;
+      }
+      const node = nodeMeta.get(nodeId)?.node;
+      if (!node) {
+        return;
+      }
+      menuNodeId = nodeId;
+      nodeMenu.textContent = '';
+
+      const skeletonActive = !!skeletonRootNodeId;
+      const skeletonBtn = document.createElement('button');
+      skeletonBtn.textContent = skeletonActive ? 'Unskeleton' : 'Skeleton';
+      skeletonBtn.addEventListener('click', () => {
+        if (skeletonActive) {
+          disableSkeleton();
+        } else {
+          if (vscode) {
+            vscode.postMessage({ type: 'openSkeleton', nodeId: nodeId, label: node.label });
+          } else {
+            enableSkeleton(nodeId);
+          }
+        }
+        hideNodeMenu();
+      });
+      nodeMenu.appendChild(skeletonBtn);
+
+      const pinInfoBtn = document.createElement('button');
+      pinInfoBtn.textContent = 'Focus Node';
+      pinInfoBtn.addEventListener('click', () => {
+        const meta = nodeMeta.get(nodeId);
+        if (meta) {
+          cameraAnim.x = meta.group.position.x;
+          cameraAnim.y = meta.group.position.y;
+          cameraAnim.zoom = Math.max(0.8, Math.min(1.6, camera.zoom));
+          cameraAnim.active = true;
+          setDetails(node);
+        }
+        hideNodeMenu();
+      });
+      nodeMenu.appendChild(pinInfoBtn);
+
+      nodeMenu.style.left = Math.max(8, x + 8) + 'px';
+      nodeMenu.style.top = Math.max(8, y + 8) + 'px';
+      nodeMenu.style.display = 'block';
+    }
+
     // No HTML escaping needed because we use textContent for tooltip content.
 
     function animate(nowMs) {
@@ -1317,9 +1655,9 @@ export class CircuitPanel {
         const next = hits[0] && hits[0].object ? hits[0].object : null;
         const nextId = next && next.userData ? next.userData.nodeId : null;
         if (nextId !== hoveredNodeId) {
-          if (hoveredNodeId) setNodeHighlight(hoveredNodeId, false);
+          if (hoveredNodeId) setNodeHighlight(hoveredNodeId, 'off');
           hoveredNodeId = nextId;
-          if (hoveredNodeId) setNodeHighlight(hoveredNodeId, true);
+          if (hoveredNodeId) setNodeHighlight(hoveredNodeId, 'focus');
         }
       }
 
@@ -1333,15 +1671,33 @@ export class CircuitPanel {
         e.arrow.material.opacity = e.isArchitectureMode ? 0 : 0.35;
         e.arrow.material.color.setHex(baseColor);
       }
-      if (hoveredNodeId) {
-        const idxs = adjacency.get(hoveredNodeId) || [];
+      // Node styling: reset before hover/selection highlights.
+      for (const [nodeId] of nodeMeta) {
+        setNodeHighlight(nodeId, 'off');
+      }
+      if (skeletonNodeIds) {
+        for (const id of skeletonNodeIds) {
+          if (nodeMeta.has(id)) {
+            setNodeHighlight(id, 'linked');
+          }
+        }
+      }
+      const focusNodeId = hoveredNodeId || selectedNodeId || skeletonRootNodeId;
+      if (focusNodeId) {
+        const idxs = adjacency.get(focusNodeId) || [];
+        const connectedNodeIds = new Set([focusNodeId]);
         for (let i = 0; i < idxs.length; i++) {
           const e = edges[idxs[i]];
           if (!e) continue;
+          connectedNodeIds.add(e.edge.from);
+          connectedNodeIds.add(e.edge.to);
           e.line.material.opacity = e.edge.kind === 'architecture' ? 0.62 : 0.78;
           e.line.material.color.setHex(0x22c55e);
           e.arrow.material.opacity = e.isArchitectureMode ? 0 : 0.65;
           e.arrow.material.color.setHex(0x22c55e);
+        }
+        for (const id of connectedNodeIds) {
+          setNodeHighlight(id, id === focusNodeId ? 'focus' : 'linked');
         }
       }
 
@@ -1358,9 +1714,22 @@ export class CircuitPanel {
     }
 
     resize();
+    applyHudState();
     updateModeUi();
     applySceneThemeByMode();
+    if (skeletonRootNodeId) {
+      viewMode = 'runtime';
+      skeletonNodeIds = getSkeletonSet(skeletonRootNodeId);
+      updateModeUi();
+      applySceneThemeByMode();
+    }
     buildGraphScene(graph);
+    if (skeletonRootNodeId) {
+      const focused = nodeMeta.get(skeletonRootNodeId)?.node;
+      if (focused) {
+        setDetails(focused);
+      }
+    }
     animate();
   </script>
 </body>
