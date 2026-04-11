@@ -372,7 +372,7 @@ export function activate(context: vscode.ExtensionContext) {
 			// 1) Jump to code in-place
 			await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
 			// 2) Show details webview (snippet)
-			await CircuitDetailsPanel.createOrShow(node, async (request) => {
+			await CircuitDetailsPanel.createOrShow(node, graph, async (request) => {
 				await loadModels();
 				const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
 				if (!model) {
@@ -388,6 +388,8 @@ export function activate(context: vscode.ExtensionContext) {
 You are Mushroom PCE's Node Details assistant.
 Answer the user's question using the node context and snippet below.
 Be clear, practical, and concise. Use markdown bullet points when helpful.
+If connection context is provided, treat it as authoritative graph evidence.
+Do not deny an edge if it appears in incoming/outgoing lists.
 
 Node:
 - label: ${request.node.label}
@@ -400,6 +402,12 @@ Snippet:
 \`\`\`
 ${request.snippet || '(no snippet available)'}
 \`\`\`
+
+Graph Connections:
+- Incoming:
+${request.connectionContext.incoming.length ? request.connectionContext.incoming.map((line) => `  - ${line}`).join('\n') : '  - none'}
+- Outgoing:
+${request.connectionContext.outgoing.length ? request.connectionContext.outgoing.map((line) => `  - ${line}`).join('\n') : '  - none'}
 
 Recent Chat:
 ${historyText || '(no previous history)'}

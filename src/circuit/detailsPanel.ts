@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as ts from 'typescript';
 
-import { CircuitNode } from './types';
+import { CircuitEdge, CircuitGraph, CircuitNode } from './types';
 
 export type NodeChatTurn = {
 	role: 'user' | 'assistant';
@@ -13,22 +13,33 @@ export type NodeChatRequest = {
 	snippet: string;
 	question: string;
 	history: NodeChatTurn[];
+	connectionContext: {
+		incoming: string[];
+		outgoing: string[];
+	};
 };
 
 export class CircuitDetailsPanel {
 	private static currentPanel: CircuitDetailsPanel | undefined;
 	private readonly panel: vscode.WebviewPanel;
 	private readonly disposables: vscode.Disposable[] = [];
-	private readonly onAsk?: (request: NodeChatRequest) => Promise<string>;
+	private onAsk?: (request: NodeChatRequest) => Promise<string>;
+	private currentGraph?: CircuitGraph;
 
 	private currentNode: CircuitNode | undefined;
 	private currentSnippet = '';
 	private chatTurns: NodeChatTurn[] = [];
 	private asking = false;
 
-	static async createOrShow(node: CircuitNode, onAsk?: (request: NodeChatRequest) => Promise<string>): Promise<CircuitDetailsPanel> {
+	static async createOrShow(
+		node: CircuitNode,
+		graph: CircuitGraph,
+		onAsk?: (request: NodeChatRequest) => Promise<string>
+	): Promise<CircuitDetailsPanel> {
 		if (CircuitDetailsPanel.currentPanel) {
 			CircuitDetailsPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
+			CircuitDetailsPanel.currentPanel.currentGraph = graph;
+			CircuitDetailsPanel.currentPanel.onAsk = onAsk;
 			await CircuitDetailsPanel.currentPanel.setNode(node);
 			return CircuitDetailsPanel.currentPanel;
 		}
@@ -38,14 +49,15 @@ export class CircuitDetailsPanel {
 			retainContextWhenHidden: true
 		});
 
-		CircuitDetailsPanel.currentPanel = new CircuitDetailsPanel(panel, onAsk);
+		CircuitDetailsPanel.currentPanel = new CircuitDetailsPanel(panel, graph, onAsk);
 		await CircuitDetailsPanel.currentPanel.setNode(node);
 		return CircuitDetailsPanel.currentPanel;
 	}
 
-	private constructor(panel: vscode.WebviewPanel, onAsk?: (request: NodeChatRequest) => Promise<string>) {
+	private constructor(panel: vscode.WebviewPanel, graph: CircuitGraph, onAsk?: (request: NodeChatRequest) => Promise<string>) {
 		this.panel = panel;
 		this.onAsk = onAsk;
+		this.currentGraph = graph;
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 		this.panel.webview.onDidReceiveMessage(
 			async (msg) => {
@@ -100,7 +112,8 @@ export class CircuitDetailsPanel {
 				node: this.currentNode,
 				snippet: this.currentSnippet,
 				question,
-				history: [...this.chatTurns]
+				history: [...this.chatTurns],
+				connectionContext: this.getConnectionContext(this.currentNode)
 			});
 			this.chatTurns.push({ role: 'assistant', text: answer?.trim() || 'No response generated.' });
 		} catch (error: any) {
@@ -117,6 +130,34 @@ export class CircuitDetailsPanel {
 		}
 		this.panel.webview.html = renderHtml(this.panel.webview, this.currentNode, this.currentSnippet, this.chatTurns, this.asking);
 	}
+
+	private getConnectionContext(node: CircuitNode): { incoming: string[]; outgoing: string[] } {
+		const graph = this.currentGraph;
+		if (!graph) {
+			return { incoming: [], outgoing: [] };
+		}
+
+		const nodeById = new Map(graph.nodes.map((n) => [n.id, n] as const));
+		const incoming = graph.edges
+			.filter((edge) => edge.to === node.id)
+			.map((edge) => describeEdge(edge, nodeById, 'in'));
+		const outgoing = graph.edges
+			.filter((edge) => edge.from === node.id)
+			.map((edge) => describeEdge(edge, nodeById, 'out'));
+		return { incoming, outgoing };
+	}
+}
+
+function describeEdge(edge: CircuitEdge, nodeById: Map<string, CircuitNode>, direction: 'in' | 'out'): string {
+	const fromNode = nodeById.get(edge.from);
+	const toNode = nodeById.get(edge.to);
+	const fromLabel = fromNode ? `${fromNode.type}:${fromNode.label}` : edge.from;
+	const toLabel = toNode ? `${toNode.type}:${toNode.label}` : edge.to;
+	const label = edge.label ? ` (${edge.label})` : '';
+	const kind = edge.kind ? ` [${edge.kind}]` : '';
+	return direction === 'in'
+		? `${fromLabel} -> ${toLabel}${label}${kind}`
+		: `${fromLabel} -> ${toLabel}${label}${kind}`;
 }
 
 async function getSnippet(node: CircuitNode): Promise<string> {
