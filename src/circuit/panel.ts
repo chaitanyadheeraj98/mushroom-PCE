@@ -126,6 +126,21 @@ export class CircuitPanel {
       background: rgba(22, 163, 74, 0.3);
       color: #dcfce7;
     }
+    .mini-btn {
+      border: 1px solid rgba(33, 48, 77, 0.9);
+      background: rgba(11, 18, 37, 0.72);
+      color: #cbd5e1;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 8px;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    .mini-btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
     #modeHint { margin-top: 6px; color: #9fb0cc; font-size: 11px; }
     #details { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; color: #cbd5e1; }
     #canvas { display: block; width: 100%; height: 100%; }
@@ -160,6 +175,10 @@ export class CircuitPanel {
         <button id="modeArchitecture" class="mode-btn active">Architecture</button>
         <button id="modeRuntime" class="mode-btn">Runtime</button>
       </div>
+      <div class="mode-row">
+        <button id="collapseAllBtn" class="mini-btn">Collapse All</button>
+        <button id="expandAllBtn" class="mini-btn">Expand All</button>
+      </div>
       <div id="modeHint">Architecture view: grouped by layers.</div>
     </div>
     <div class="card" style="max-width: 520px;">
@@ -187,6 +206,8 @@ export class CircuitPanel {
     const portTip = document.getElementById('portTip');
     const modeArchitectureBtn = document.getElementById('modeArchitecture');
     const modeRuntimeBtn = document.getElementById('modeRuntime');
+    const collapseAllBtn = document.getElementById('collapseAllBtn');
+    const expandAllBtn = document.getElementById('expandAllBtn');
     const modeHint = document.getElementById('modeHint');
 
     let graph = ${graphJson};
@@ -197,6 +218,14 @@ export class CircuitPanel {
       const saved = vscode?.getState?.();
       if (saved && (saved.viewMode === 'architecture' || saved.viewMode === 'runtime')) {
         viewMode = saved.viewMode;
+      }
+      if (saved && Array.isArray(saved.collapsedLayers)) {
+        for (let i = 0; i < saved.collapsedLayers.length; i++) {
+          const key = saved.collapsedLayers[i];
+          if (typeof key === 'string') {
+            collapsedLayers.add(key);
+          }
+        }
       }
     } catch {}
 
@@ -278,6 +307,10 @@ export class CircuitPanel {
     const nodeMeta = new Map(); // node.id -> { group, body, w, h, node }
     const adjacency = new Map(); // nodeId -> edge indices
     const edges = []; // { edge, line, arrow, label, curve, particle, t }
+    const nodeAnimations = []; // { group, target, targetScale, delay }
+    const manualNodePositions = new Map(); // nodeId -> THREE.Vector3
+    const cameraAnim = { x: 0, y: 0, zoom: 1, active: false };
+    let lastFrameAt = 0;
 
     function clearSceneGroups() {
       for (const g of [nodeGroup, edgeGroup, labelGroup, particleGroup]) {
@@ -289,6 +322,7 @@ export class CircuitPanel {
       nodeMeta.clear();
       adjacency.clear();
       edges.length = 0;
+      nodeAnimations.length = 0;
     }
 
     function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
@@ -367,6 +401,37 @@ export class CircuitPanel {
       return spr;
     }
 
+    function makePillSprite(text, bgRgba, fgHex) {
+      const canvasEl = document.createElement('canvas');
+      const ctx = canvasEl.getContext('2d');
+      const font = '700 11px Segoe UI, Tahoma, sans-serif';
+      ctx.font = font;
+      const metrics = ctx.measureText(text);
+      const w = clamp(Math.ceil(metrics.width + 14), 24, 100);
+      const h = 20;
+      canvasEl.width = w;
+      canvasEl.height = h;
+      ctx.font = font;
+      ctx.fillStyle = bgRgba;
+      roundRect(ctx, 0, 0, w, h, 8);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(33, 48, 77, 0.95)';
+      ctx.lineWidth = 1;
+      roundRect(ctx, 0.5, 0.5, w - 1, h - 1, 8);
+      ctx.stroke();
+      ctx.fillStyle = fgHex;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, 7, h / 2);
+
+      const tex = new THREE.CanvasTexture(canvasEl);
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+      const spr = new THREE.Sprite(mat);
+      spr.scale.set(w * 0.55, h * 0.55, 1);
+      return spr;
+    }
+
     function roundRect(ctx, x, y, w, h, r) {
       ctx.beginPath();
       ctx.moveTo(x + r, y);
@@ -386,6 +451,17 @@ export class CircuitPanel {
       }
       const key = node.id.slice('layer:'.length);
       return key === 'system-root' ? undefined : key;
+    }
+
+    function getLayerMemberCount(layerKey) {
+      let count = 0;
+      for (let i = 0; i < graph.nodes.length; i++) {
+        const node = graph.nodes[i];
+        if (node.type === 'function' && node.layer === layerKey) {
+          count++;
+        }
+      }
+      return count;
     }
 
     function getVisibleGraph(g) {
@@ -431,9 +507,12 @@ export class CircuitPanel {
         }
 
         const positions = new Map();
-        const rowGap = 160;
-        const layerX = -260;
-        const fnX = 220;
+        const rowGap = 178;
+        const layerX = -290;
+        const fnBaseX = 240;
+        const fnColGap = 274;
+        const fnRowGap = 112;
+        const maxPerRow = 4;
 
         for (let li = 0; li < layerOrder.length; li++) {
           const layerKey = layerOrder[li];
@@ -445,8 +524,13 @@ export class CircuitPanel {
           }
           const members = lane.filter((n) => n.type !== 'layer');
           for (let mi = 0; mi < members.length; mi++) {
-            const spread = (mi - (members.length - 1) / 2) * 130;
-            positions.set(members[mi].id, new THREE.Vector3(fnX + spread, y, 0));
+            const colsInThisLayer = Math.min(maxPerRow, Math.max(1, members.length));
+            const col = mi % colsInThisLayer;
+            const row = Math.floor(mi / colsInThisLayer);
+            const totalRows = Math.ceil(members.length / colsInThisLayer);
+            const colOffset = (col - (colsInThisLayer - 1) / 2) * fnColGap;
+            const rowOffset = (row - (totalRows - 1) / 2) * fnRowGap;
+            positions.set(members[mi].id, new THREE.Vector3(fnBaseX + colOffset, y + rowOffset, 0));
           }
         }
 
@@ -484,14 +568,13 @@ export class CircuitPanel {
       return positions;
     }
 
-    function fitViewToGraph() {
+    function fitViewToGraph(targetPositions) {
       const items = Array.from(nodeMeta.values());
       if (!items.length) {
-        controls.target.set(0, 0, 0);
-        camera.position.set(0, 0, 900);
-        camera.zoom = 1;
-        camera.updateProjectionMatrix();
-        controls.update();
+        cameraAnim.x = 0;
+        cameraAnim.y = 0;
+        cameraAnim.zoom = 1;
+        cameraAnim.active = true;
         return;
       }
 
@@ -500,10 +583,11 @@ export class CircuitPanel {
       let minY = Infinity;
       let maxY = -Infinity;
       for (const meta of items) {
-        const left = meta.group.position.x - (meta.w / 2);
-        const right = meta.group.position.x + (meta.w / 2);
-        const top = meta.group.position.y + (meta.h / 2);
-        const bottom = meta.group.position.y - (meta.h / 2);
+        const p = targetPositions && targetPositions.get(meta.node.id) ? targetPositions.get(meta.node.id) : meta.group.position;
+        const left = p.x - (meta.w / 2);
+        const right = p.x + (meta.w / 2);
+        const top = p.y + (meta.h / 2);
+        const bottom = p.y - (meta.h / 2);
         minX = Math.min(minX, left);
         maxX = Math.max(maxX, right);
         minY = Math.min(minY, bottom);
@@ -522,14 +606,20 @@ export class CircuitPanel {
       const zoomY = viewH / (boundsH + margin * 2);
       const nextZoom = clamp(Math.min(zoomX, zoomY), 0.35, 2.4);
 
-      camera.zoom = nextZoom;
-      camera.position.set(cx, cy, 900);
-      controls.target.set(cx, cy, 0);
-      camera.updateProjectionMatrix();
-      controls.update();
+      cameraAnim.x = cx;
+      cameraAnim.y = cy;
+      cameraAnim.zoom = nextZoom;
+      cameraAnim.active = true;
     }
 
     function buildGraphScene(g) {
+      const previousNodeState = new Map();
+      for (const [id, meta] of nodeMeta.entries()) {
+        previousNodeState.set(id, {
+          position: meta.group.position.clone(),
+          scale: meta.group.scale.x || 1
+        });
+      }
       clearSceneGroups();
       const isArchitectureMode = viewMode === 'architecture';
       const visibleGraph = getVisibleGraph(g);
@@ -553,7 +643,22 @@ export class CircuitPanel {
         const h = node.type === 'layer' ? NODE_H - 16 : NODE_H;
 
         const group = new THREE.Group();
-        group.position.copy(positions.get(node.id));
+        const targetPosition = positions.get(node.id);
+        const previous = previousNodeState.get(node.id);
+        if (previous) {
+          group.position.copy(previous.position);
+        } else if (manualNodePositions.has(node.id)) {
+          group.position.copy(manualNodePositions.get(node.id));
+        } else if (isArchitectureMode && node.type === 'function' && node.layer) {
+          const layerAnchor = positions.get('layer:' + node.layer);
+          if (layerAnchor) {
+            group.position.set(layerAnchor.x, layerAnchor.y, 0);
+          } else {
+            group.position.copy(targetPosition);
+          }
+        } else {
+          group.position.copy(targetPosition);
+        }
         group.userData.kind = 'nodeGroup';
 
         const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, 8), new THREE.MeshStandardMaterial({
@@ -595,6 +700,17 @@ export class CircuitPanel {
 
         const label = makeLabelSprite(labelText);
         label.position.set((-w / 2) + 80, 0, 6.5);
+        if (isArchitectureMode && node.type === 'layer') {
+          const layerKey = getCollapseKeyForNode(node);
+          if (layerKey) {
+            const collapsed = collapsedLayers.has(layerKey);
+            const memberCount = getLayerMemberCount(layerKey);
+            const badgeText = (collapsed ? '+' : '-') + ' ' + String(memberCount);
+            const badge = makePillSprite(badgeText, 'rgba(11, 18, 37, 0.88)', '#cbd5e1');
+            badge.position.set((w / 2) - 34, (h / 2) - 12, 7.4);
+            group.add(badge);
+          }
+        }
 
         const inputs = !isArchitectureMode && Array.isArray(node.inputs) ? node.inputs : [];
         const outputs = !isArchitectureMode && Array.isArray(node.outputs) ? node.outputs : [];
@@ -642,6 +758,17 @@ export class CircuitPanel {
         nodeBodies.push(body);
         nodeByMeshUuid.set(body.uuid, node);
         nodeMeta.set(node.id, { group: group, body: body, w: w, h: h, ports: ports, node: node });
+        const targetScale = 1;
+        const startScale = previous ? previous.scale : (isArchitectureMode ? 0.86 : 0.92);
+        group.scale.setScalar(startScale);
+        const delay = isArchitectureMode ? Math.max(0, (Math.abs(targetPosition.y) * 0.0007)) : 0;
+        nodeAnimations.push({
+          nodeId: node.id,
+          group: group,
+          target: targetPosition.clone(),
+          targetScale: targetScale,
+          delay: delay
+        });
       }
 
       // Create edges (line + arrow + label + particle). Geometry is updated every frame in case nodes move.
@@ -697,7 +824,7 @@ export class CircuitPanel {
         adjacency.set(edge.to, a2);
       }
 
-      fitViewToGraph();
+      fitViewToGraph(positions);
     }
 
     function getOutAnchor(nodeId, portId) {
@@ -850,9 +977,42 @@ export class CircuitPanel {
             ? 'Architecture view: grouped by layers. Click a layer to collapse.'
             : 'Runtime view: function call/data-flow with ports and animated movement.';
       }
+      if (collapseAllBtn) {
+        collapseAllBtn.disabled = viewMode !== 'architecture';
+      }
+      if (expandAllBtn) {
+        expandAllBtn.disabled = viewMode !== 'architecture';
+      }
       try {
-        vscode?.setState?.({ viewMode: viewMode });
+        vscode?.setState?.({ viewMode: viewMode, collapsedLayers: Array.from(collapsedLayers) });
       } catch {}
+    }
+
+    function collapseAllLayers() {
+      if (viewMode !== 'architecture') {
+        return;
+      }
+      collapsedLayers.clear();
+      for (let i = 0; i < graph.nodes.length; i++) {
+        const node = graph.nodes[i];
+        if (node.type === 'layer') {
+          const key = getCollapseKeyForNode(node);
+          if (key) {
+            collapsedLayers.add(key);
+          }
+        }
+      }
+      buildGraphScene(graph);
+      setDetails(null);
+    }
+
+    function expandAllLayers() {
+      if (viewMode !== 'architecture') {
+        return;
+      }
+      collapsedLayers.clear();
+      buildGraphScene(graph);
+      setDetails(null);
     }
 
     function applySceneThemeByMode() {
@@ -946,6 +1106,11 @@ export class CircuitPanel {
       const hit = hits[0] && hits[0].object ? hits[0].object : null;
       if (hit && hit.userData && hit.userData.nodeId) {
         const nodeId = hit.userData.nodeId;
+        for (let i = nodeAnimations.length - 1; i >= 0; i--) {
+          if (nodeAnimations[i].nodeId === nodeId) {
+            nodeAnimations.splice(i, 1);
+          }
+        }
         dragging = { nodeId: nodeId, moved: false };
         controls.enabled = false;
         canvas.setPointerCapture?.(ev.pointerId);
@@ -973,6 +1138,7 @@ export class CircuitPanel {
       if (dragging) {
         const nodeId = dragging.nodeId;
         const didMove = dragging.moved;
+        const meta = nodeMeta.get(nodeId);
         dragging = null;
 
         // Treat a non-move pointer up as a click selection.
@@ -996,6 +1162,13 @@ export class CircuitPanel {
           if (node && vscode && (node.type === 'function' || node.type === 'sink')) {
             vscode.postMessage({ type: 'navigate', node: node });
           }
+        } else if (meta) {
+          manualNodePositions.set(nodeId, meta.group.position.clone());
+          for (let i = nodeAnimations.length - 1; i >= 0; i--) {
+            if (nodeAnimations[i].nodeId === nodeId) {
+              nodeAnimations.splice(i, 1);
+            }
+          }
         }
       }
       if (panning) {
@@ -1009,6 +1182,8 @@ export class CircuitPanel {
     window.addEventListener('pointerup', onPointerUp);
     modeArchitectureBtn?.addEventListener('click', () => setViewMode('architecture'));
     modeRuntimeBtn?.addEventListener('click', () => setViewMode('runtime'));
+    collapseAllBtn?.addEventListener('click', collapseAllLayers);
+    expandAllBtn?.addEventListener('click', expandAllLayers);
     canvas.addEventListener('dblclick', (ev) => {
       // Only toggle when double-clicking on background (not on a node).
       updatePointer(ev);
@@ -1086,9 +1261,54 @@ export class CircuitPanel {
 
     // No HTML escaping needed because we use textContent for tooltip content.
 
-    function animate() {
+    function animate(nowMs) {
       requestAnimationFrame(animate);
+      const dt = lastFrameAt ? Math.min(0.05, (nowMs - lastFrameAt) / 1000) : 0.016;
+      lastFrameAt = nowMs;
       controls.update();
+
+      // Smooth camera transitions after mode/layout changes.
+      if (cameraAnim.active && !dragging && !panning) {
+        const camLerp = 0.14;
+        camera.position.x += (cameraAnim.x - camera.position.x) * camLerp;
+        camera.position.y += (cameraAnim.y - camera.position.y) * camLerp;
+        controls.target.x += (cameraAnim.x - controls.target.x) * camLerp;
+        controls.target.y += (cameraAnim.y - controls.target.y) * camLerp;
+        camera.zoom += (cameraAnim.zoom - camera.zoom) * camLerp;
+        camera.updateProjectionMatrix();
+        if (
+          Math.abs(camera.position.x - cameraAnim.x) < 0.8 &&
+          Math.abs(camera.position.y - cameraAnim.y) < 0.8 &&
+          Math.abs(camera.zoom - cameraAnim.zoom) < 0.002
+        ) {
+          cameraAnim.active = false;
+        }
+      }
+
+      // Smooth node transitions for expand/collapse and relayout.
+      for (let i = 0; i < nodeAnimations.length; i++) {
+        const anim = nodeAnimations[i];
+        if (!anim || !anim.group) {
+          continue;
+        }
+        if (anim.delay > 0) {
+          anim.delay = Math.max(0, anim.delay - dt);
+          continue;
+        }
+        anim.group.position.lerp(anim.target, 0.2);
+        const s = anim.group.scale.x + (anim.targetScale - anim.group.scale.x) * 0.2;
+        anim.group.scale.setScalar(s);
+        if (
+          anim.delay <= 0 &&
+          anim.group.position.distanceTo(anim.target) < 0.6 &&
+          Math.abs(anim.group.scale.x - anim.targetScale) < 0.01
+        ) {
+          anim.group.position.copy(anim.target);
+          anim.group.scale.setScalar(anim.targetScale);
+          nodeAnimations.splice(i, 1);
+          i--;
+        }
+      }
 
       // Hover detection (only when not dragging).
       if (!dragging) {
