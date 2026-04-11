@@ -1,7 +1,7 @@
 import * as ts from 'typescript';
 import * as vscode from 'vscode';
 
-import { CircuitEdge, CircuitGraph, CircuitNode, CircuitPort } from './types';
+import { CircuitEdge, CircuitGraph, CircuitLayer, CircuitNode, CircuitPort } from './types';
 
 type FunctionInfo = {
 	id: string;
@@ -42,6 +42,7 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 		if (existing) {
 			return existing;
 		}
+		const layer = classifyFunctionLayer(fn.name);
 
 		const inputs: CircuitPort[] = fn.params.map((param) => ({
 			id: `in:${fn.name}:${param}`,
@@ -65,6 +66,8 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 		const node: CircuitNode = {
 			id: fn.id,
 			type: 'function',
+			layer,
+			groupId: `group:${layer}`,
 			label: fn.name,
 			uri,
 			detail,
@@ -87,6 +90,7 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 		const node: CircuitNode = {
 			id,
 			type: 'sink',
+			layer: 'runtime',
 			label,
 			uri,
 			detail: 'output sink',
@@ -107,22 +111,44 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 		return node;
 	};
 
-	const addEdge = (from: string, to: string, fromPort?: string, toPort?: string, label?: string): void => {
+	const addEdge = (
+		from: string,
+		to: string,
+		fromPort?: string,
+		toPort?: string,
+		label?: string,
+		kind: 'architecture' | 'runtime' = 'runtime'
+	): void => {
 		if (!nodeById.has(from) || !nodeById.has(to) || from === to) {
 			return;
 		}
 
-		const key = `${from}:${fromPort ?? ''}->${to}:${toPort ?? ''}:${label ?? ''}`;
+		const key = `${kind}:${from}:${fromPort ?? ''}->${to}:${toPort ?? ''}:${label ?? ''}`;
 		if (edgeKey.has(key)) {
 			return;
 		}
 
 		edgeKey.add(key);
-		edges.push({ id: `e:${edges.length}`, from, to, fromPort, toPort, label });
+		edges.push({ id: `e:${edges.length}`, kind, from, to, fromPort, toPort, label });
 	};
 
 	for (const fn of functions) {
 		addFunctionNode(fn);
+	}
+
+	const hasTopLevelExecutable = sourceFile.statements.some((statement) => !isFunctionHostStatement(statement));
+	let topLevelFn: FunctionInfo | undefined;
+	if (hasTopLevelExecutable) {
+		topLevelFn = {
+			id: 'function:main',
+			name: 'main',
+			node: ts.factory.createFunctionExpression(undefined, undefined, undefined, undefined, [], undefined, ts.factory.createBlock([], true)),
+			line: 0,
+			character: 0,
+			params: [],
+			signals: []
+		};
+		addFunctionNode(topLevelFn);
 	}
 
 	for (const fn of functions) {
@@ -140,7 +166,7 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 		if (isFunctionHostStatement(statement)) {
 			continue;
 		}
-		analyzeNode(statement, undefined, topLevelScope, functionByName, nodeById, addSinkNode, addEdge, () => {
+		analyzeNode(statement, topLevelFn, topLevelScope, functionByName, nodeById, addSinkNode, addEdge, () => {
 			consoleSinkCreated = true;
 		});
 	}
@@ -149,7 +175,94 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 		nodeById.delete('sink:console.log');
 	}
 
+	buildArchitectureHierarchy(nodeById, addEdge);
+
 	return { nodes: [...nodeById.values()], edges };
+}
+
+function classifyFunctionLayer(name: string): CircuitLayer {
+	const baseName = name.split('.').pop() ?? name;
+	const lower = baseName.toLowerCase();
+	if (baseName === 'activate') {
+		return 'system';
+	}
+	if (lower.includes('command') || lower.startsWith('set') || lower.startsWith('open') || lower.startsWith('select')) {
+		return 'command';
+	}
+	if (lower.startsWith('run') || lower.startsWith('load') || lower.includes('analysis') || lower.includes('restore')) {
+		return 'orchestration';
+	}
+	if (lower.includes('panel') || lower.includes('view') || lower.includes('render') || lower.includes('mode')) {
+		return 'ui';
+	}
+	if (lower.includes('state') || lower.includes('cache') || lower.includes('model') || lower.includes('editor')) {
+		return 'state';
+	}
+	if (
+		lower.startsWith('escape') ||
+		lower.startsWith('extract') ||
+		lower.startsWith('count') ||
+		lower.startsWith('get') ||
+		lower.startsWith('infer') ||
+		lower.startsWith('uniq')
+	) {
+		return 'utility';
+	}
+	return 'feature';
+}
+
+function buildArchitectureHierarchy(
+	nodeById: Map<string, CircuitNode>,
+	addEdge: (from: string, to: string, fromPort?: string, toPort?: string, label?: string, kind?: 'architecture' | 'runtime') => void
+): void {
+	const layers: CircuitLayer[] = ['system', 'command', 'orchestration', 'state', 'ui', 'feature', 'utility'];
+	const rootId = 'layer:system-root';
+	if (!nodeById.has(rootId)) {
+		nodeById.set(rootId, {
+			id: rootId,
+			type: 'layer',
+			layer: 'system',
+			label: 'System',
+			detail: 'Top-level architecture root'
+		});
+	}
+
+	for (const layer of layers) {
+		const layerId = `layer:${layer}`;
+		if (!nodeById.has(layerId)) {
+			nodeById.set(layerId, {
+				id: layerId,
+				type: 'layer',
+				layer,
+				label: titleCaseLayer(layer),
+				parentId: rootId,
+				detail: `Architecture layer: ${layer}`
+			});
+		}
+		addEdge(rootId, layerId, undefined, undefined, 'contains', 'architecture');
+	}
+
+	for (const node of nodeById.values()) {
+		if (node.type !== 'function') {
+			continue;
+		}
+		const layer = node.layer ?? 'feature';
+		const layerId = `layer:${layer}`;
+		node.parentId = layerId;
+		node.groupId = layerId;
+		addEdge(layerId, node.id, undefined, undefined, 'includes', 'architecture');
+	}
+
+	for (let i = 0; i < layers.length - 1; i++) {
+		addEdge(`layer:${layers[i]}`, `layer:${layers[i + 1]}`, undefined, undefined, 'flows-to', 'architecture');
+	}
+}
+
+function titleCaseLayer(layer: CircuitLayer): string {
+	return layer
+		.split('-')
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(' ');
 }
 
 function collectFunctions(sourceFile: ts.SourceFile): FunctionInfo[] {

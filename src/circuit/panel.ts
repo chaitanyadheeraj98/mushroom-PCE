@@ -110,6 +110,23 @@ export class CircuitPanel {
     }
     .title { font-weight: 700; margin-bottom: 6px; }
     .muted { color: #9fb0cc; font-size: 12px; }
+    .mode-row { display: flex; gap: 8px; margin-top: 8px; pointer-events: auto; }
+    .mode-btn {
+      border: 1px solid rgba(33, 48, 77, 0.95);
+      background: rgba(11, 18, 37, 0.8);
+      color: #cbd5e1;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 5px 10px;
+      cursor: pointer;
+    }
+    .mode-btn.active {
+      border-color: rgba(34, 197, 94, 0.9);
+      background: rgba(22, 163, 74, 0.3);
+      color: #dcfce7;
+    }
+    #modeHint { margin-top: 6px; color: #9fb0cc; font-size: 11px; }
     #details { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; color: #cbd5e1; }
     #canvas { display: block; width: 100%; height: 100%; }
     #portTip {
@@ -138,7 +155,12 @@ export class CircuitPanel {
   <div id="hud">
     <div class="card">
       <div class="title">Circuit Mode</div>
-      <div class="muted">Double-click to toggle Hand mode (pan). Drag nodes to rearrange. Scroll to zoom.</div>
+      <div class="muted">Double-click to toggle Hand mode (pan). Drag nodes to rearrange. Scroll to zoom. In Architecture view, click a layer node to collapse/expand it.</div>
+      <div class="mode-row">
+        <button id="modeArchitecture" class="mode-btn active">Architecture</button>
+        <button id="modeRuntime" class="mode-btn">Runtime</button>
+      </div>
+      <div id="modeHint">Architecture view: grouped by layers.</div>
     </div>
     <div class="card" style="max-width: 520px;">
       <div class="title">Selection</div>
@@ -163,8 +185,20 @@ export class CircuitPanel {
     const canvas = document.getElementById('canvas');
     const details = document.getElementById('details');
     const portTip = document.getElementById('portTip');
+    const modeArchitectureBtn = document.getElementById('modeArchitecture');
+    const modeRuntimeBtn = document.getElementById('modeRuntime');
+    const modeHint = document.getElementById('modeHint');
 
     let graph = ${graphJson};
+    let viewMode = 'architecture'; // architecture | runtime
+    const collapsedLayers = new Set();
+
+    try {
+      const saved = vscode?.getState?.();
+      if (saved && (saved.viewMode === 'architecture' || saved.viewMode === 'runtime')) {
+        viewMode = saved.viewMode;
+      }
+    } catch {}
 
     // Node-RED style 2D node graph (boxes + ports) on the Z=0 plane.
     const scene = new THREE.Scene();
@@ -185,6 +219,9 @@ export class CircuitPanel {
     controls.dampingFactor = 0.12;
     controls.screenSpacePanning = true;
     controls.zoomSpeed = 0.9;
+    controls.minPolarAngle = Math.PI / 2;
+    controls.maxPolarAngle = Math.PI / 2;
+    controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN };
     // Disable built-in mouse bindings; we manage drag behaviors.
     controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
 
@@ -212,9 +249,23 @@ export class CircuitPanel {
     const NODE_BODY_COLOR = 0x132238;
     const NODE_HEADER_COLOR = 0x1d3656;
     const NODE_ACCENT_COLOR = 0x7dd3fc;
+    const layerColors = {
+      system: 0xf59e0b,
+      command: 0x38bdf8,
+      orchestration: 0xa78bfa,
+      state: 0xfacc15,
+      ui: 0x34d399,
+      feature: 0xfb7185,
+      utility: 0x94a3b8,
+      runtime: 0x7dd3fc
+    };
     const palette = {
       function: NODE_ACCENT_COLOR,
-      sink: 0xfbbf24
+      sink: 0xfbbf24,
+      layer: 0x60a5fa,
+      module: 0x22c55e,
+      state: 0xfacc15,
+      utility: 0x94a3b8
     };
     const portColors = {
       in: 0xa78bfa,   // purple
@@ -326,7 +377,87 @@ export class CircuitPanel {
       ctx.closePath();
     }
 
+    function getCollapseKeyForNode(node) {
+      if (!node || node.type !== 'layer') {
+        return undefined;
+      }
+      if (typeof node.id !== 'string' || !node.id.startsWith('layer:')) {
+        return undefined;
+      }
+      const key = node.id.slice('layer:'.length);
+      return key === 'system-root' ? undefined : key;
+    }
+
+    function getVisibleGraph(g) {
+      const visibleNodes = [];
+      const allowedNodeIds = new Set();
+      for (let i = 0; i < g.nodes.length; i++) {
+        const node = g.nodes[i];
+        const includeInArchitecture = node.type === 'layer' || node.type === 'function';
+        const includeInRuntime = node.type === 'function' || node.type === 'sink';
+        const layerCollapsed = viewMode === 'architecture' && node.type === 'function' && node.layer && collapsedLayers.has(node.layer);
+        const shouldInclude = (viewMode === 'architecture' ? includeInArchitecture : includeInRuntime) && !layerCollapsed;
+        if (shouldInclude) {
+          visibleNodes.push(node);
+          allowedNodeIds.add(node.id);
+        }
+      }
+
+      const visibleEdges = [];
+      for (let i = 0; i < g.edges.length; i++) {
+        const edge = g.edges[i];
+        const isArchitectureEdge = edge.kind === 'architecture';
+        const includeEdge = viewMode === 'architecture' ? isArchitectureEdge : !isArchitectureEdge;
+        if (!includeEdge) continue;
+        if (!allowedNodeIds.has(edge.from) || !allowedNodeIds.has(edge.to)) continue;
+        visibleEdges.push(edge);
+      }
+      return { nodes: visibleNodes, edges: visibleEdges };
+    }
+
     function layoutNodes(nodes) {
+      if (viewMode === 'architecture') {
+        const layerOrder = ['system', 'command', 'orchestration', 'state', 'ui', 'feature', 'utility', 'runtime'];
+        const layers = new Map();
+        for (let i = 0; i < layerOrder.length; i++) {
+          layers.set(layerOrder[i], []);
+        }
+        for (let i = 0; i < nodes.length; i++) {
+          const node = nodes[i];
+          const key = node.layer || (node.type === 'layer' ? 'feature' : 'runtime');
+          const arr = layers.get(key) || [];
+          arr.push(node);
+          layers.set(key, arr);
+        }
+
+        const positions = new Map();
+        const rowGap = 160;
+        const layerX = -260;
+        const fnX = 220;
+
+        for (let li = 0; li < layerOrder.length; li++) {
+          const layerKey = layerOrder[li];
+          const y = (layerOrder.length / 2 - li) * rowGap;
+          const lane = layers.get(layerKey) || [];
+          const layerNode = lane.find((n) => n.type === 'layer');
+          if (layerNode) {
+            positions.set(layerNode.id, new THREE.Vector3(layerX, y, 0));
+          }
+          const members = lane.filter((n) => n.type !== 'layer');
+          for (let mi = 0; mi < members.length; mi++) {
+            const spread = (mi - (members.length - 1) / 2) * 130;
+            positions.set(members[mi].id, new THREE.Vector3(fnX + spread, y, 0));
+          }
+        }
+
+        for (let i = 0; i < nodes.length; i++) {
+          if (!positions.has(nodes[i].id)) {
+            positions.set(nodes[i].id, new THREE.Vector3(0, 0, 0));
+          }
+        }
+        return positions;
+      }
+
       const byType = new Map();
       for (const n of nodes) {
         const arr = byType.get(n.type) || [];
@@ -353,19 +484,73 @@ export class CircuitPanel {
       return positions;
     }
 
+    function fitViewToGraph() {
+      const items = Array.from(nodeMeta.values());
+      if (!items.length) {
+        controls.target.set(0, 0, 0);
+        camera.position.set(0, 0, 900);
+        camera.zoom = 1;
+        camera.updateProjectionMatrix();
+        controls.update();
+        return;
+      }
+
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const meta of items) {
+        const left = meta.group.position.x - (meta.w / 2);
+        const right = meta.group.position.x + (meta.w / 2);
+        const top = meta.group.position.y + (meta.h / 2);
+        const bottom = meta.group.position.y - (meta.h / 2);
+        minX = Math.min(minX, left);
+        maxX = Math.max(maxX, right);
+        minY = Math.min(minY, bottom);
+        maxY = Math.max(maxY, top);
+      }
+
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const boundsW = Math.max(1, maxX - minX);
+      const boundsH = Math.max(1, maxY - minY);
+      const margin = 140;
+
+      const viewW = Math.max(1, camera.right - camera.left);
+      const viewH = Math.max(1, camera.top - camera.bottom);
+      const zoomX = viewW / (boundsW + margin * 2);
+      const zoomY = viewH / (boundsH + margin * 2);
+      const nextZoom = clamp(Math.min(zoomX, zoomY), 0.35, 2.4);
+
+      camera.zoom = nextZoom;
+      camera.position.set(cx, cy, 900);
+      controls.target.set(cx, cy, 0);
+      camera.updateProjectionMatrix();
+      controls.update();
+    }
+
     function buildGraphScene(g) {
       clearSceneGroups();
+      const isArchitectureMode = viewMode === 'architecture';
+      const visibleGraph = getVisibleGraph(g);
 
-      const positions = layoutNodes(g.nodes);
+      const positions = layoutNodes(visibleGraph.nodes);
+      const laneTotals = new Map();
+      const laneSeen = new Map();
+      for (let i = 0; i < visibleGraph.edges.length; i++) {
+        const edge = visibleGraph.edges[i];
+        const key = edge.from + '=>' + edge.to;
+        laneTotals.set(key, (laneTotals.get(key) || 0) + 1);
+      }
 
       const portGeom = new THREE.SphereGeometry(5.2, 14, 14);
       const iconGeom = new THREE.BoxGeometry(NODE_ICON_W, NODE_ICON_H, 10);
 
-      for (const node of g.nodes) {
-        const color = palette[node.type] || 0x94a3b8;
+      for (const node of visibleGraph.nodes) {
+        const color = layerColors[node.layer] || palette[node.type] || 0x94a3b8;
         const labelText = fitLabel(node.label, 22);
-        const w = NODE_W;
-        const h = NODE_H;
+        const w = node.type === 'layer' ? NODE_W - 42 : NODE_W;
+        const h = node.type === 'layer' ? NODE_H - 16 : NODE_H;
 
         const group = new THREE.Group();
         group.position.copy(positions.get(node.id));
@@ -411,8 +596,8 @@ export class CircuitPanel {
         const label = makeLabelSprite(labelText);
         label.position.set((-w / 2) + 80, 0, 6.5);
 
-        const inputs = Array.isArray(node.inputs) ? node.inputs : [];
-        const outputs = Array.isArray(node.outputs) ? node.outputs : [];
+        const inputs = !isArchitectureMode && Array.isArray(node.inputs) ? node.inputs : [];
+        const outputs = !isArchitectureMode && Array.isArray(node.outputs) ? node.outputs : [];
         const ports = { in: [], out: [], byId: new Map() };
 
         const makePort = (x, y, dir, port) => {
@@ -460,29 +645,49 @@ export class CircuitPanel {
       }
 
       // Create edges (line + arrow + label + particle). Geometry is updated every frame in case nodes move.
-      for (let ei = 0; ei < g.edges.length; ei++) {
-        const edge = g.edges[ei];
+      for (let ei = 0; ei < visibleGraph.edges.length; ei++) {
+        const edge = visibleGraph.edges[ei];
         const lineGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-        const lineMat = new THREE.LineBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.28 });
+        const edgeColor = edge.kind === 'architecture' ? 0x818cf8 : 0x3b82f6;
+        const lineMat = new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: edge.kind === 'architecture' ? 0.38 : 0.28 });
         const line = new THREE.Line(lineGeom, lineMat);
         edgeGroup.add(line);
 
         const arrow = new THREE.Mesh(
           new THREE.ConeGeometry(6.2, 16, 14),
-          new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.55 })
+          new THREE.MeshBasicMaterial({ color: edgeColor, transparent: true, opacity: 0.55 })
         );
         arrow.rotation.z = Math.PI / 2;
+        arrow.visible = !isArchitectureMode;
         particleGroup.add(arrow);
 
         const particle = new THREE.Mesh(new THREE.SphereGeometry(4.0, 12, 12), new THREE.MeshBasicMaterial({ color: 0x22c55e }));
+        particle.visible = !isArchitectureMode;
         particleGroup.add(particle);
 
-        const label = edge.label ? makeEdgeLabel(edge.label) : null;
+        const laneKey = edge.from + '=>' + edge.to;
+        const laneIndex = laneSeen.get(laneKey) || 0;
+        laneSeen.set(laneKey, laneIndex + 1);
+        const laneCount = laneTotals.get(laneKey) || 1;
+
+        const showLabel = edge.label && edge.label !== 'calls';
+        const label = showLabel ? makeEdgeLabel(edge.label) : null;
         if (label) {
           labelGroup.add(label);
         }
 
-        edges.push({ edge: edge, line: line, arrow: arrow, label: label, particle: particle, t: Math.random(), curve: null });
+        edges.push({
+          edge: edge,
+          line: line,
+          arrow: arrow,
+          label: label,
+          particle: particle,
+          t: Math.random(),
+          curve: null,
+          laneIndex: laneIndex,
+          laneCount: laneCount,
+          isArchitectureMode: isArchitectureMode
+        });
 
         const a1 = adjacency.get(edge.from) || [];
         a1.push(edges.length - 1);
@@ -492,9 +697,7 @@ export class CircuitPanel {
         adjacency.set(edge.to, a2);
       }
 
-      // Fit view roughly around the layout.
-      controls.target.set(0, 0, 0);
-      controls.update();
+      fitViewToGraph();
     }
 
     function getOutAnchor(nodeId, portId) {
@@ -539,8 +742,9 @@ export class CircuitPanel {
       const dx = p2.x - p1.x;
       const dy = p2.y - p1.y;
       const bend = clamp(Math.abs(dx) * 0.25, 40, 180);
+      const laneShift = ((e.laneIndex || 0) - ((e.laneCount || 1) - 1) / 2) * 18;
       const mid = new THREE.Vector3(p1.x + dx * 0.5, p1.y + dy * 0.5, 0);
-      mid.y += (dy >= 0 ? 1 : -1) * Math.min(140, bend * 0.3);
+      mid.y += (dy >= 0 ? 1 : -1) * Math.min(140, bend * 0.3) + laneShift;
 
       const curve = new THREE.QuadraticBezierCurve3(p1, mid, p2);
       e.curve = curve;
@@ -562,7 +766,7 @@ export class CircuitPanel {
       // Edge label.
       if (e.label) {
         const midp = curve.getPointAt(0.5);
-        e.label.position.set(midp.x, midp.y + 14, 0);
+        e.label.position.set(midp.x, midp.y + 14 + laneShift * 0.25, 0);
       }
     }
 
@@ -573,17 +777,22 @@ export class CircuitPanel {
       }
       const idxs = adjacency.get(node.id) || [];
       const lines = [];
+      const collapseKey = getCollapseKeyForNode(node);
+      const isCollapsed = collapseKey ? collapsedLayers.has(collapseKey) : false;
       for (let i = 0; i < Math.min(18, idxs.length); i++) {
         const e = edges[idxs[i]];
         if (!e) continue;
         const dir = (e.edge.from === node.id) ? '->' : '<-';
         const other = (e.edge.from === node.id) ? e.edge.to : e.edge.from;
         const label = e.edge.label ? (' (' + e.edge.label + ')') : '';
-        lines.push(dir + ' ' + other + label);
+        const kind = e.edge.kind ? (' [' + e.edge.kind + ']') : '';
+        lines.push(dir + ' ' + other + label + kind);
       }
       details.textContent = [
         'label: ' + node.label,
         'type: ' + node.type,
+        node.layer ? 'layer: ' + node.layer : null,
+        collapseKey ? ('collapsed: ' + (isCollapsed ? 'yes' : 'no')) : null,
         node.detail ? 'detail: ' + node.detail : null,
         typeof node.line === 'number' ? 'line: ' + (node.line + 1) : null,
         lines.length ? ('edges:\\n' + lines.join('\\n')) : null
@@ -626,6 +835,58 @@ export class CircuitPanel {
     function toggleHandMode() {
       handMode = !handMode;
       setCursor();
+    }
+
+    function updateModeUi() {
+      if (modeArchitectureBtn) {
+        modeArchitectureBtn.classList.toggle('active', viewMode === 'architecture');
+      }
+      if (modeRuntimeBtn) {
+        modeRuntimeBtn.classList.toggle('active', viewMode === 'runtime');
+      }
+      if (modeHint) {
+        modeHint.textContent =
+          viewMode === 'architecture'
+            ? 'Architecture view: grouped by layers. Click a layer to collapse.'
+            : 'Runtime view: function call/data-flow with ports and animated movement.';
+      }
+      try {
+        vscode?.setState?.({ viewMode: viewMode });
+      } catch {}
+    }
+
+    function applySceneThemeByMode() {
+      if (viewMode === 'architecture') {
+        scene.background = new THREE.Color(0x070b18);
+        if (grid.material && Array.isArray(grid.material)) {
+          for (const m of grid.material) {
+            m.opacity = 0.24;
+            m.transparent = true;
+          }
+        }
+      } else {
+        scene.background = new THREE.Color(0x060d1c);
+        if (grid.material && Array.isArray(grid.material)) {
+          for (const m of grid.material) {
+            m.opacity = 0.4;
+            m.transparent = true;
+          }
+        }
+      }
+    }
+
+    function setViewMode(nextMode) {
+      if (nextMode !== 'architecture' && nextMode !== 'runtime') {
+        return;
+      }
+      if (viewMode === nextMode) {
+        return;
+      }
+      viewMode = nextMode;
+      updateModeUi();
+      applySceneThemeByMode();
+      buildGraphScene(graph);
+      setDetails(null);
     }
 
     function onPointerMove(ev) {
@@ -718,8 +979,21 @@ export class CircuitPanel {
         if (!didMove) {
           selectedNodeId = nodeId;
           const node = nodeMeta.get(nodeId)?.node;
-          setDetails(node);
-          if (node && vscode) {
+          if (node && viewMode === 'architecture' && node.type === 'layer') {
+            const collapseKey = getCollapseKeyForNode(node);
+            if (collapseKey) {
+              if (collapsedLayers.has(collapseKey)) {
+                collapsedLayers.delete(collapseKey);
+              } else {
+                collapsedLayers.add(collapseKey);
+              }
+              buildGraphScene(graph);
+            }
+            setDetails(node);
+          } else {
+            setDetails(node);
+          }
+          if (node && vscode && (node.type === 'function' || node.type === 'sink')) {
             vscode.postMessage({ type: 'navigate', node: node });
           }
         }
@@ -733,6 +1007,8 @@ export class CircuitPanel {
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointerup', onPointerUp);
+    modeArchitectureBtn?.addEventListener('click', () => setViewMode('architecture'));
+    modeRuntimeBtn?.addEventListener('click', () => setViewMode('runtime'));
     canvas.addEventListener('dblclick', (ev) => {
       // Only toggle when double-clicking on background (not on a node).
       updatePointer(ev);
@@ -830,19 +1106,21 @@ export class CircuitPanel {
       // Edge styling: dim by default, highlight connected edges on hover.
       for (let i = 0; i < edges.length; i++) {
         const e = edges[i];
-        e.line.material.opacity = 0.22;
-        e.line.material.color.setHex(0x3b82f6);
-        e.arrow.material.opacity = 0.35;
-        e.arrow.material.color.setHex(0x3b82f6);
+        const baseColor = e.edge.kind === 'architecture' ? 0x818cf8 : 0x3b82f6;
+        const baseOpacity = e.edge.kind === 'architecture' ? 0.34 : 0.22;
+        e.line.material.opacity = baseOpacity;
+        e.line.material.color.setHex(baseColor);
+        e.arrow.material.opacity = e.isArchitectureMode ? 0 : 0.35;
+        e.arrow.material.color.setHex(baseColor);
       }
       if (hoveredNodeId) {
         const idxs = adjacency.get(hoveredNodeId) || [];
         for (let i = 0; i < idxs.length; i++) {
           const e = edges[idxs[i]];
           if (!e) continue;
-          e.line.material.opacity = 0.78;
+          e.line.material.opacity = e.edge.kind === 'architecture' ? 0.62 : 0.78;
           e.line.material.color.setHex(0x22c55e);
-          e.arrow.material.opacity = 0.65;
+          e.arrow.material.opacity = e.isArchitectureMode ? 0 : 0.65;
           e.arrow.material.color.setHex(0x22c55e);
         }
       }
@@ -850,7 +1128,9 @@ export class CircuitPanel {
       // Animate particles and update edge geometry (supports drag).
       for (let i = 0; i < edges.length; i++) {
         const e = edges[i];
-        e.t = (e.t + 0.004) % 1;
+        if (!e.isArchitectureMode) {
+          e.t = (e.t + 0.004) % 1;
+        }
         updateEdgeVisual(e);
       }
 
@@ -858,6 +1138,8 @@ export class CircuitPanel {
     }
 
     resize();
+    updateModeUi();
+    applySceneThemeByMode();
     buildGraphScene(graph);
     animate();
   </script>

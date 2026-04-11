@@ -16,6 +16,7 @@ export class MushroomPanel {
 	private availableModelLabels: string[] = [];
 	private symbolLinks: SymbolLink[] = [];
 	private currentResponseMode: ResponseMode = 'developer';
+	private languageWarning: string | undefined;
 
 	private pendingRender: ReturnType<typeof setTimeout> | undefined;
 
@@ -109,6 +110,11 @@ export class MushroomPanel {
 		this.renderSoon();
 	}
 
+	setLanguageWarning(warning: string | undefined): void {
+		this.languageWarning = warning;
+		this.renderSoon();
+	}
+
 	private renderSoon(): void {
 		if (this.disposed) {
 			return;
@@ -141,6 +147,9 @@ export class MushroomPanel {
 
 		const listActive = this.currentResponseMode === 'list';
 		const developerActive = this.currentResponseMode === 'developer';
+		const warningHtml = this.languageWarning
+			? `<div class="warning-card">${escapeHtml(this.languageWarning)}</div>`
+			: '';
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -281,6 +290,15 @@ export class MushroomPanel {
     .analyze-btn.disabled { background: var(--btn-disabled); cursor: not-allowed; pointer-events: none; }
     .fallback-link { color: #93c5fd; font-size: 12px; text-decoration: none; }
     .fallback-link:hover { text-decoration: underline; }
+    .warning-card {
+      border: 1px solid color-mix(in oklab, #f59e0b 65%, white);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: color-mix(in oklab, #f59e0b 18%, var(--panel));
+      color: #fde68a;
+      font-size: 12px;
+      line-height: 1.5;
+    }
     .content {
       flex: 1;
       overflow-y: auto;
@@ -298,6 +316,25 @@ export class MushroomPanel {
     .content p { margin: 8px 0; }
     .content ul, .content ol { margin: 8px 0 8px 20px; padding: 0; }
     .content li { margin: 4px 0; }
+    .content li.list-section-imports { color: #a78bfa; }
+    .content li.list-section-exports { color: #c084fc; }
+    .content li.list-section-variables { color: #facc15; }
+    .content li.list-section-constants { color: #fbbf24; }
+    .content li.list-section-functions { color: #93c5fd; }
+    .content li.list-section-methods { color: #60a5fa; }
+    .content li.list-section-classes { color: #34d399; }
+    .content li.list-section-super-classes-inheritance { color: #10b981; }
+    .content li.list-section-interfaces-types-enums { color: #22c55e; }
+    .content li.list-section-objects-instances { color: #f472b6; }
+    .content li.list-section-data-models-schemas { color: #fb7185; }
+    .content li.list-section-parameters { color: #38bdf8; }
+    .content li.list-section-return-types { color: #0ea5e9; }
+    .content li.list-section-control-structures { color: #f87171; }
+    .content li.list-section-operators { color: #f97316; }
+    .content li.list-section-data-structures { color: #2dd4bf; }
+    .content li.list-section-async-concurrency { color: #818cf8; }
+    .content li.list-section-module-file-structure { color: #a3a3a3; }
+    .content li.list-section-other-concepts-detected { color: #e5e7eb; }
     .content code {
       background: var(--code-bg);
       border: 1px solid var(--border);
@@ -340,6 +377,7 @@ export class MushroomPanel {
         <a class="mode-pill ${developerActive ? 'active' : ''}" href="command:mushroom-pce.setDeveloperMode">Developer Mode</a>
       </div>
     </div>
+    ${warningHtml}
     <div class="toolbar">
       ${buttonHtml}
       <a class="fallback-link" href="command:mushroom-pce.analyzeActive">Analyze (fallback)</a>

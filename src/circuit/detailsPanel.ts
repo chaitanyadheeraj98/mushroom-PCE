@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as ts from 'typescript';
 
 import { CircuitNode } from './types';
 
@@ -49,16 +50,29 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 		}
 
 		const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(node.uri));
-		const startLine = Math.max(0, node.line);
-		const maxLine = Math.min(doc.lineCount - 1, startLine + 120);
+		const astSnippet = tryGetAstSnippet(doc, node);
+		if (astSnippet) {
+			return astSnippet;
+		}
 
-		// Best-effort: expand to block end if the line seems to start a block.
-		const startText = doc.lineAt(startLine).text;
+		const startLine = Math.max(0, node.line);
+		const maxLine = Math.min(doc.lineCount - 1, startLine + 220);
+
+		// Best-effort fallback: expand to block end.
+		let blockStart = startLine;
+		for (let li = startLine; li <= Math.min(maxLine, startLine + 8); li++) {
+			if (doc.lineAt(li).text.includes('{')) {
+				blockStart = li;
+				break;
+			}
+		}
+
+		const startText = doc.lineAt(blockStart).text;
 		let endLine = startLine;
 		if (startText.includes('{')) {
 			let depth = 0;
 			let started = false;
-			for (let li = startLine; li <= maxLine; li++) {
+			for (let li = blockStart; li <= maxLine; li++) {
 				const text = doc.lineAt(li).text;
 				for (const ch of text) {
 					if (ch === '{') {
@@ -83,6 +97,90 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 	}
 }
 
+function tryGetAstSnippet(doc: vscode.TextDocument, node: CircuitNode): string | undefined {
+	const code = doc.getText();
+	const sourceFile = ts.createSourceFile(doc.fileName, code, ts.ScriptTarget.Latest, true, inferScriptKind(doc.languageId));
+
+	const targetLabel = node.label;
+	const dottedParts = targetLabel.split('.');
+	const targetClass = dottedParts.length > 1 ? dottedParts.slice(0, -1).join('.') : undefined;
+	const targetName = dottedParts[dottedParts.length - 1];
+
+	let found: ts.Node | undefined;
+	const visit = (n: ts.Node, className?: string) => {
+		if (found) {
+			return;
+		}
+
+		if (ts.isFunctionDeclaration(n) && n.name?.text === targetLabel) {
+			found = n;
+			return;
+		}
+
+		if (ts.isVariableStatement(n)) {
+			for (const d of n.declarationList.declarations) {
+				if (!ts.isIdentifier(d.name) || !d.initializer) {
+					continue;
+				}
+				if ((ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) && d.name.text === targetLabel) {
+					found = n;
+					return;
+				}
+			}
+		}
+
+		if (ts.isClassDeclaration(n)) {
+			const nextClass = n.name?.text ?? className;
+			ts.forEachChild(n, (child) => visit(child, nextClass));
+			return;
+		}
+
+		if (ts.isMethodDeclaration(n)) {
+			const methodName = getMethodName(n.name);
+			if (methodName) {
+				const full = className ? `${className}.${methodName}` : methodName;
+				if (full === targetLabel || (!targetClass && methodName === targetName)) {
+					found = n;
+					return;
+				}
+			}
+		}
+
+		ts.forEachChild(n, (child) => visit(child, className));
+	};
+
+	visit(sourceFile);
+
+	if (!found) {
+		return undefined;
+	}
+	const start = found.getStart(sourceFile);
+	const end = found.getEnd();
+	return code.slice(start, end);
+}
+
+function getMethodName(name: ts.PropertyName): string | undefined {
+	if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+		return name.text;
+	}
+	return undefined;
+}
+
+function inferScriptKind(languageId: string): ts.ScriptKind {
+	switch ((languageId || '').toLowerCase()) {
+		case 'javascript':
+		case 'javascriptreact':
+			return ts.ScriptKind.JS;
+		case 'typescript':
+		case 'typescriptreact':
+			return ts.ScriptKind.TS;
+		case 'json':
+			return ts.ScriptKind.JSON;
+		default:
+			return ts.ScriptKind.Unknown;
+	}
+}
+
 function renderHtml(node: CircuitNode, snippet: string): string {
 	const esc = (s: string) =>
 		s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -90,6 +188,7 @@ function renderHtml(node: CircuitNode, snippet: string): string {
 	const title = `${node.type}: ${node.label}`;
 	const meta = [
 		`type: ${node.type}`,
+		node.layer ? `layer: ${node.layer}` : '',
 		node.detail ? `detail: ${node.detail}` : '',
 		typeof node.line === 'number' ? `line: ${node.line + 1}` : ''
 	]

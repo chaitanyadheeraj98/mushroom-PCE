@@ -63,6 +63,41 @@ export function activate(context: vscode.ExtensionContext) {
 		return editor?.document ?? lastDocument;
 	};
 
+	const detectLanguageMismatchWarning = (languageId: string, code: string): string | undefined => {
+		const text = code.trim();
+		if (!text) {
+			return undefined;
+		}
+
+		const normalizedLanguage = languageId.toLowerCase();
+		const isTsLike = ['typescript', 'typescriptreact', 'javascript', 'javascriptreact'].includes(normalizedLanguage);
+		const isPythonMode = normalizedLanguage === 'python';
+
+		const pythonSignals = [
+			/\bdef\s+[A-Za-z_]\w*\s*\(/,
+			/\bprint\s*\(/,
+			/\b(input|elif|None|True|False)\b/,
+			/:\s*(#.*)?$/m
+		];
+		const tsSignals = [
+			/\b(const|let|var|function|interface|type|class)\b/,
+			/=>/,
+			/[{}]/,
+			/;\s*$/m
+		];
+
+		const pythonScore = pythonSignals.reduce((acc, regex) => (regex.test(text) ? acc + 1 : acc), 0);
+		const tsScore = tsSignals.reduce((acc, regex) => (regex.test(text) ? acc + 1 : acc), 0);
+
+		if (isTsLike && pythonScore >= 2 && pythonScore > tsScore) {
+			return 'Language mode is set to TypeScript/JavaScript, but the code looks like Python. List Mode may miss symbols. Switch the file language mode for better results.';
+		}
+		if (isPythonMode && tsScore >= 2 && tsScore > pythonScore) {
+			return 'Language mode is set to Python, but the code looks like TypeScript/JavaScript. List Mode may miss symbols. Switch the file language mode for better results.';
+		}
+		return undefined;
+	};
+
 	const getCacheKey = (doc: vscode.TextDocument, modelId: string, mode: ResponseMode): string =>
 		`${doc.uri.toString()}::${modelId}::${mode}`;
 
@@ -148,9 +183,12 @@ export function activate(context: vscode.ExtensionContext) {
 			output.appendLine('runAnalysis aborted: empty file');
 			panel.setStatus('No code detected');
 			panel.setExplanation('Type or paste code in the active file, then click Analyze.');
+			panel.setLanguageWarning(undefined);
 			panel.setAnalyzing(false);
 			return;
 		}
+
+		panel.setLanguageWarning(detectLanguageMismatchWarning(document.languageId, code));
 
 		const runId = ++latestRunId;
 		panel.clear();
@@ -182,13 +220,16 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 
-		if (!streamed) {
-			panel.setExplanation(explanation || 'No explanation generated.');
-		}
+		const finalExplanation =
+			selectedResponseMode === 'list' && explanation
+				? addFrequencyToListOutput(explanation, code)
+				: explanation;
 
-		if (explanation) {
+		panel.setExplanation(finalExplanation || 'No explanation generated.');
+
+		if (finalExplanation) {
 			const cacheKey = getCacheKey(document, model.id, selectedResponseMode);
-			analysisCache.set(cacheKey, { text: explanation, updatedAt: Date.now(), docVersion: document.version });
+			analysisCache.set(cacheKey, { text: finalExplanation, updatedAt: Date.now(), docVersion: document.version });
 		}
 
 		panel.setAnalyzing(false);
@@ -213,6 +254,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 		panel.setStatus('Ready');
 		panel.setExplanation('Click Analyze to explain the active file.');
+		panel.setLanguageWarning(undefined);
 		applyModeStateToPanel(panel);
 
 		if (lastDocument) {
@@ -378,6 +420,63 @@ export function activate(context: vscode.ExtensionContext) {
 		onEditorChange,
 		onDocumentChange
 	);
+}
+
+function addFrequencyToListOutput(markdown: string, code: string): string {
+	const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+	const nextLines: string[] = [];
+
+	for (const rawLine of lines) {
+		const match = rawLine.match(/^(\s*[-*]\s+)(.+)$/);
+		if (!match) {
+			nextLines.push(rawLine);
+			continue;
+		}
+
+		const prefix = match[1];
+		const rawItem = match[2].trim();
+		if (!rawItem || rawItem === '-') {
+			nextLines.push(rawLine);
+			continue;
+		}
+
+		const cleaned = rawItem.replace(/\s+\(x\d+\)\s*$/, '').trim();
+		const count = countSymbolOccurrences(code, cleaned);
+		if (count <= 0) {
+			nextLines.push(`${prefix}${cleaned}`);
+			continue;
+		}
+
+		nextLines.push(`${prefix}${cleaned} (x${count})`);
+	}
+
+	return nextLines.join('\n');
+}
+
+function countSymbolOccurrences(code: string, symbol: string): number {
+	const text = symbol.replace(/^`|`$/g, '').trim();
+	if (!text || text === '-') {
+		return 0;
+	}
+
+	// If a line contains aliases/descriptions, focus on the first token-like chunk.
+	const baseToken = text.split(/\s+[-–—:|]/)[0].trim();
+	const needle = baseToken || text;
+	const escaped = escapeRegExp(needle);
+
+	let regex: RegExp;
+	if (/^[A-Za-z_$][\w$]*$/.test(needle)) {
+		regex = new RegExp(`\\b${escaped}\\b`, 'g');
+	} else {
+		regex = new RegExp(escaped, 'g');
+	}
+
+	const matches = code.match(regex);
+	return matches ? matches.length : 0;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function explainCode(

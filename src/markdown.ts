@@ -9,6 +9,7 @@ export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): str
 	const out: string[] = [];
 	let inCode = false;
 	let listMode: '' | 'ul' | 'ol' = '';
+	let currentSection = '';
 
 	const closeList = () => {
 		if (listMode === 'ul') {
@@ -38,16 +39,19 @@ export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): str
 		}
 		if (line.startsWith('### ')) {
 			closeList();
+			currentSection = sectionKeyFromHeading(line.slice(4));
 			out.push(`<h3>${inlineMd(line.slice(4), symbolLinks)}</h3>`);
 			continue;
 		}
 		if (line.startsWith('## ')) {
 			closeList();
+			currentSection = sectionKeyFromHeading(line.slice(3));
 			out.push(`<h2>${inlineMd(line.slice(3), symbolLinks)}</h2>`);
 			continue;
 		}
 		if (line.startsWith('# ')) {
 			closeList();
+			currentSection = sectionKeyFromHeading(line.slice(2));
 			out.push(`<h1>${inlineMd(line.slice(2), symbolLinks)}</h1>`);
 			continue;
 		}
@@ -57,7 +61,7 @@ export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): str
 				out.push('<ul>');
 				listMode = 'ul';
 			}
-			out.push(`<li>${inlineMd(line.replace(/^[-*]\s+/, ''), symbolLinks)}</li>`);
+			out.push(`<li class="list-section-${currentSection || 'default'}">${inlineMd(line.replace(/^[-*]\s+/, ''), symbolLinks)}</li>`);
 			continue;
 		}
 		if (/^\d+\.\s+/.test(line)) {
@@ -66,7 +70,7 @@ export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): str
 				out.push('<ol>');
 				listMode = 'ol';
 			}
-			out.push(`<li>${inlineMd(line.replace(/^\d+\.\s+/, ''), symbolLinks)}</li>`);
+			out.push(`<li class="list-section-${currentSection || 'default'}">${inlineMd(line.replace(/^\d+\.\s+/, ''), symbolLinks)}</li>`);
 			continue;
 		}
 		closeList();
@@ -74,6 +78,16 @@ export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): str
 	}
 	closeList();
 	return out.join('') || '<p>No explanation generated.</p>';
+}
+
+function sectionKeyFromHeading(heading: string): string {
+	return heading
+		.toLowerCase()
+		.replace(/&/g, 'and')
+		.replace(/\//g, ' ')
+		.replace(/[^a-z0-9\s-]/g, '')
+		.trim()
+		.replace(/\s+/g, '-');
 }
 
 function inlineMd(text: string, symbolLinks: SymbolLink[]): string {
@@ -216,4 +230,3 @@ export function escapeHtml(value: string): string {
 		.replace(/"/g, '&quot;')
 		.replace(/'/g, '&#39;');
 }
-
