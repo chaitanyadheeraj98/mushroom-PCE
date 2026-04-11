@@ -3,12 +3,30 @@ import * as ts from 'typescript';
 
 import { CircuitNode } from './types';
 
+export type NodeChatTurn = {
+	role: 'user' | 'assistant';
+	text: string;
+};
+
+export type NodeChatRequest = {
+	node: CircuitNode;
+	snippet: string;
+	question: string;
+	history: NodeChatTurn[];
+};
+
 export class CircuitDetailsPanel {
 	private static currentPanel: CircuitDetailsPanel | undefined;
 	private readonly panel: vscode.WebviewPanel;
 	private readonly disposables: vscode.Disposable[] = [];
+	private readonly onAsk?: (request: NodeChatRequest) => Promise<string>;
 
-	static async createOrShow(node: CircuitNode): Promise<CircuitDetailsPanel> {
+	private currentNode: CircuitNode | undefined;
+	private currentSnippet = '';
+	private chatTurns: NodeChatTurn[] = [];
+	private asking = false;
+
+	static async createOrShow(node: CircuitNode, onAsk?: (request: NodeChatRequest) => Promise<string>): Promise<CircuitDetailsPanel> {
 		if (CircuitDetailsPanel.currentPanel) {
 			CircuitDetailsPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
 			await CircuitDetailsPanel.currentPanel.setNode(node);
@@ -16,18 +34,29 @@ export class CircuitDetailsPanel {
 		}
 
 		const panel = vscode.window.createWebviewPanel('mushroomPceCircuitDetails', 'Mushroom PCE: Node Details', vscode.ViewColumn.Beside, {
-			enableScripts: false,
+			enableScripts: true,
 			retainContextWhenHidden: true
 		});
 
-		CircuitDetailsPanel.currentPanel = new CircuitDetailsPanel(panel);
+		CircuitDetailsPanel.currentPanel = new CircuitDetailsPanel(panel, onAsk);
 		await CircuitDetailsPanel.currentPanel.setNode(node);
 		return CircuitDetailsPanel.currentPanel;
 	}
 
-	private constructor(panel: vscode.WebviewPanel) {
+	private constructor(panel: vscode.WebviewPanel, onAsk?: (request: NodeChatRequest) => Promise<string>) {
 		this.panel = panel;
+		this.onAsk = onAsk;
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+		this.panel.webview.onDidReceiveMessage(
+			async (msg) => {
+				if (msg?.type !== 'ask') {
+					return;
+				}
+				await this.handleAsk(String(msg?.question ?? ''));
+			},
+			null,
+			this.disposables
+		);
 	}
 
 	dispose(): void {
@@ -38,8 +67,55 @@ export class CircuitDetailsPanel {
 	}
 
 	private async setNode(node: CircuitNode): Promise<void> {
-		const snippet = await getSnippet(node);
-		this.panel.webview.html = renderHtml(node, snippet);
+		const nodeChanged = this.currentNode?.id !== node.id;
+		this.currentNode = node;
+		this.currentSnippet = await getSnippet(node);
+		if (nodeChanged) {
+			this.chatTurns = [];
+		}
+		this.render();
+	}
+
+	private async handleAsk(rawQuestion: string): Promise<void> {
+		if (this.asking || !this.currentNode) {
+			return;
+		}
+
+		const question = rawQuestion.trim();
+		if (!question) {
+			return;
+		}
+
+		this.chatTurns.push({ role: 'user', text: question });
+		this.asking = true;
+		this.render();
+
+		try {
+			if (!this.onAsk) {
+				this.chatTurns.push({ role: 'assistant', text: 'Chat handler is not configured yet.' });
+				return;
+			}
+
+			const answer = await this.onAsk({
+				node: this.currentNode,
+				snippet: this.currentSnippet,
+				question,
+				history: [...this.chatTurns]
+			});
+			this.chatTurns.push({ role: 'assistant', text: answer?.trim() || 'No response generated.' });
+		} catch (error: any) {
+			this.chatTurns.push({ role: 'assistant', text: `Error: ${error?.message ?? String(error)}` });
+		} finally {
+			this.asking = false;
+			this.render();
+		}
+	}
+
+	private render(): void {
+		if (!this.currentNode) {
+			return;
+		}
+		this.panel.webview.html = renderHtml(this.panel.webview, this.currentNode, this.currentSnippet, this.chatTurns, this.asking);
 	}
 }
 
@@ -58,7 +134,6 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 		const startLine = Math.max(0, node.line);
 		const maxLine = Math.min(doc.lineCount - 1, startLine + 220);
 
-		// Best-effort fallback: expand to block end.
 		let blockStart = startLine;
 		for (let li = startLine; li <= Math.min(maxLine, startLine + 8); li++) {
 			if (doc.lineAt(li).text.includes('{')) {
@@ -181,7 +256,8 @@ function inferScriptKind(languageId: string): ts.ScriptKind {
 	}
 }
 
-function renderHtml(node: CircuitNode, snippet: string): string {
+function renderHtml(webview: vscode.Webview, node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[], asking: boolean): string {
+	const nonce = getNonce();
 	const esc = (s: string) =>
 		s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
@@ -195,27 +271,87 @@ function renderHtml(node: CircuitNode, snippet: string): string {
 		.filter(Boolean)
 		.join(' | ');
 
+	const chatHtml = chatTurns.length
+		? chatTurns
+				.map((turn) => {
+					const css = turn.role === 'user' ? 'chat-bubble user' : 'chat-bubble assistant';
+					const label = turn.role === 'user' ? 'You' : 'Mushroom AI';
+					return `<div class="${css}"><div class="who">${label}</div><div class="msg">${esc(turn.text)}</div></div>`;
+				})
+				.join('')
+		: '<div class="chat-empty">Ask anything about this node, logic, edge-cases, or improvements.</div>';
+
 	return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${esc(title)}</title>
   <style>
-    :root { --bg:#0b1020; --panel:#0f172a; --text:#e2e8f0; --muted:#9fb0cc; --border:#21304d; --code:#0b1225; }
+    :root { --bg:#0b1020; --panel:#0f172a; --text:#e2e8f0; --muted:#9fb0cc; --border:#21304d; --code:#0b1225; --accent:#22c55e; }
     body { margin:0; padding:16px; background: radial-gradient(circle at top right, #1e293b, var(--bg) 55%); color:var(--text); font-family: Segoe UI, Tahoma, sans-serif; }
     h1 { font-size:16px; margin:0 0 6px; }
     .meta { color: var(--muted); font-size:12px; margin-bottom: 12px; }
-    pre { background: var(--code); border:1px solid var(--border); border-radius:10px; padding:12px; overflow:auto; }
+    pre { background: var(--code); border:1px solid var(--border); border-radius:10px; padding:12px; overflow:auto; max-height: 260px; }
     code { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+    .chat-wrap { margin-top: 14px; border:1px solid var(--border); border-radius: 10px; background: color-mix(in oklab, var(--panel) 96%, black); }
+    .chat-head { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+    .chat-log { padding: 10px; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+    .chat-bubble { border-radius: 10px; padding: 8px 10px; border:1px solid var(--border); }
+    .chat-bubble.user { align-self: flex-end; background: rgba(34,197,94,0.17); max-width: 86%; }
+    .chat-bubble.assistant { align-self: flex-start; background: rgba(59,130,246,0.13); max-width: 92%; }
+    .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .msg { white-space: pre-wrap; line-height: 1.45; font-size: 13px; }
+    .chat-empty { color: var(--muted); font-size: 12px; }
+    .ask-row { display: flex; gap: 8px; padding: 10px; border-top:1px solid var(--border); }
+    textarea { flex:1; resize: vertical; min-height: 56px; max-height: 120px; border-radius: 8px; border:1px solid var(--border); background: #0b1225; color: var(--text); padding: 8px; font-family: Segoe UI, Tahoma, sans-serif; font-size: 13px; }
+    button { border:none; border-radius: 8px; padding: 10px 12px; background: #16a34a; color: #fff; font-weight: 600; cursor: pointer; align-self: flex-end; }
+    button:disabled { background: #334155; cursor: default; }
   </style>
 </head>
 <body>
   <h1>${esc(title)}</h1>
   <div class="meta">${esc(meta)}</div>
   <pre><code>${esc(snippet || '(no snippet available)')}</code></pre>
+  <div class="chat-wrap">
+    <div class="chat-head">Node Chat (uses selected model from Mushroom PCE)</div>
+    <div id="chatLog" class="chat-log">${chatHtml}</div>
+    <div class="ask-row">
+      <textarea id="question" placeholder="Ask about this node's logic, bugs, edge cases, improvements..." ${asking ? 'disabled' : ''}></textarea>
+      <button id="askBtn" ${asking ? 'disabled' : ''}>${asking ? 'Thinking...' : 'Ask'}</button>
+    </div>
+  </div>
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    const askBtn = document.getElementById('askBtn');
+    const question = document.getElementById('question');
+    const chatLog = document.getElementById('chatLog');
+    const submit = () => {
+      const text = String(question.value || '').trim();
+      if (!text) return;
+      vscode.postMessage({ type: 'ask', question: text });
+    };
+    askBtn?.addEventListener('click', submit);
+    question?.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        submit();
+      }
+    });
+    if (chatLog) {
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+  </script>
 </body>
 </html>`;
 }
 
+function getNonce(): string {
+	let text = '';
+	const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+	for (let i = 0; i < 32; i++) {
+		text += possible.charAt(Math.floor(Math.random() * possible.length));
+	}
+	return text;
+}

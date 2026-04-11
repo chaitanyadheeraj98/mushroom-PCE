@@ -372,7 +372,72 @@ export function activate(context: vscode.ExtensionContext) {
 			// 1) Jump to code in-place
 			await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
 			// 2) Show details webview (snippet)
-			await CircuitDetailsPanel.createOrShow(node);
+			await CircuitDetailsPanel.createOrShow(node, async (request) => {
+				await loadModels();
+				const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+				if (!model) {
+					return 'No AI model is currently available. Open Copilot/Chat model access and try again.';
+				}
+
+				const historyText = request.history
+					.slice(-8)
+					.map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)
+					.join('\n');
+
+				const prompt = `
+You are Mushroom PCE's Node Details assistant.
+Answer the user's question using the node context and snippet below.
+Be clear, practical, and concise. Use markdown bullet points when helpful.
+
+Node:
+- label: ${request.node.label}
+- type: ${request.node.type}
+- layer: ${request.node.layer ?? 'unknown'}
+- line: ${typeof request.node.line === 'number' ? request.node.line + 1 : 'unknown'}
+- detail: ${request.node.detail ?? 'n/a'}
+
+Snippet:
+\`\`\`
+${request.snippet || '(no snippet available)'}
+\`\`\`
+
+Recent Chat:
+${historyText || '(no previous history)'}
+
+User Question:
+${request.question}
+`;
+
+				const messages = [new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, prompt)];
+				const response = await model.sendRequest(messages);
+				const res: any = response;
+				const streamCandidate = res?.stream ?? res;
+
+				if (streamCandidate && typeof streamCandidate[Symbol.asyncIterator] === 'function') {
+					let text = '';
+					for await (const chunk of streamCandidate) {
+						text += extractTextFromChunk(chunk);
+					}
+					return text || 'No response generated.';
+				}
+
+				if (Array.isArray(res?.content)) {
+					const text = res.content
+						.map((item: any) => (typeof item?.text === 'string' ? item.text : ''))
+						.join('');
+					return text || 'No response generated.';
+				}
+
+				if (typeof res?.text === 'string') {
+					return res.text;
+				}
+
+				if (typeof res === 'string') {
+					return res;
+				}
+
+				return JSON.stringify(res, null, 2);
+			});
 		});
 	});
 
