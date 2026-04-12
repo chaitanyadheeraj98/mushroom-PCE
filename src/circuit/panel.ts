@@ -249,6 +249,13 @@ export class CircuitPanel {
       opacity: 0.45;
       cursor: default;
     }
+    #selectionActions {
+      margin-top: 8px;
+      pointer-events: auto;
+    }
+    #includeExternalBtn {
+      display: none;
+    }
     #modeHint { margin-top: 6px; color: #9fb0cc; font-size: 11px; }
     #details { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; color: #cbd5e1; }
     #canvas { display: block; width: 100%; height: 100%; }
@@ -328,6 +335,9 @@ export class CircuitPanel {
     <div class="card hud-selection-card" style="max-width: 520px;">
       <div class="title">Selection</div>
       <div id="details" class="muted">None</div>
+      <div id="selectionActions" class="mode-row">
+        <button id="includeExternalBtn" class="mini-btn">Include external neighbors</button>
+      </div>
     </div>
   </div>
   <div id="portTip"></div>
@@ -354,6 +364,7 @@ export class CircuitPanel {
     const modeRuntimeBtn = document.getElementById('modeRuntime');
     const collapseAllBtn = document.getElementById('collapseAllBtn');
     const expandAllBtn = document.getElementById('expandAllBtn');
+    const includeExternalBtn = document.getElementById('includeExternalBtn');
     const modeHint = document.getElementById('modeHint');
     const hudMinBtn = document.getElementById('hudMinBtn');
     const hudMaxBtn = document.getElementById('hudMaxBtn');
@@ -1070,24 +1081,60 @@ export class CircuitPanel {
       }
     }
 
+    function formatEdgeLine(edge, nodeId) {
+      const dir = (edge.from === nodeId) ? '->' : '<-';
+      const other = (edge.from === nodeId) ? edge.to : edge.from;
+      const label = edge.label ? (' (' + edge.label + ')') : '';
+      const kind = edge.kind ? (' [' + edge.kind + ']') : '';
+      return dir + ' ' + other + label + kind;
+    }
+
+    function updateSelectionActions(node, hiddenCount) {
+      if (!includeExternalBtn) {
+        return;
+      }
+      const showInclude = !!node && !!selectedNodeId && !!skeletonNodeIds;
+      includeExternalBtn.style.display = showInclude ? 'inline-flex' : 'none';
+      includeExternalBtn.disabled = !showInclude || hiddenCount <= 0;
+      includeExternalBtn.textContent =
+        hiddenCount > 0
+          ? 'Include external neighbors (' + hiddenCount + ')'
+          : 'Include external neighbors';
+    }
+
     function setDetails(node) {
       if (!node) {
         details.textContent = 'None';
+        updateSelectionActions(undefined, 0);
         return;
       }
       const idxs = adjacency.get(node.id) || [];
-      const lines = [];
+      const visibleLines = [];
+      const visibleEdgeIds = new Set();
       const collapseKey = getCollapseKeyForNode(node);
       const isCollapsed = collapseKey ? collapsedLayers.has(collapseKey) : false;
       for (let i = 0; i < Math.min(18, idxs.length); i++) {
         const e = edges[idxs[i]];
         if (!e) continue;
-        const dir = (e.edge.from === node.id) ? '->' : '<-';
-        const other = (e.edge.from === node.id) ? e.edge.to : e.edge.from;
-        const label = e.edge.label ? (' (' + e.edge.label + ')') : '';
-        const kind = e.edge.kind ? (' [' + e.edge.kind + ']') : '';
-        lines.push(dir + ' ' + other + label + kind);
+        visibleEdgeIds.add(e.edge.id);
+        visibleLines.push(formatEdgeLine(e.edge, node.id));
       }
+
+      const globalEdgesByMode = getVisibleGraph(graph, null).edges;
+      const hiddenGlobalLines = [];
+      for (let i = 0; i < globalEdgesByMode.length; i++) {
+        const edge = globalEdgesByMode[i];
+        if (edge.from !== node.id && edge.to !== node.id) {
+          continue;
+        }
+        if (visibleEdgeIds.has(edge.id)) {
+          continue;
+        }
+        hiddenGlobalLines.push(formatEdgeLine(edge, node.id));
+      }
+
+      updateSelectionActions(node, hiddenGlobalLines.length);
+
       details.textContent = [
         'label: ' + node.label,
         'type: ' + node.type,
@@ -1096,8 +1143,35 @@ export class CircuitPanel {
         collapseKey ? ('collapsed: ' + (isCollapsed ? 'yes' : 'no')) : null,
         node.detail ? 'detail: ' + node.detail : null,
         typeof node.line === 'number' ? 'line: ' + (node.line + 1) : null,
-        lines.length ? ('edges:\\n' + lines.join('\\n')) : null
+        visibleLines.length ? ('visible edges:\\n' + visibleLines.join('\\n')) : 'visible edges: none',
+        hiddenGlobalLines.length ? ('hidden global edges:\\n' + hiddenGlobalLines.join('\\n')) : 'hidden global edges: none'
       ].filter(Boolean).join('\\n');
+    }
+
+    function includeExternalNeighborsForSelected() {
+      if (!selectedNodeId) {
+        return;
+      }
+
+      if (!skeletonNodeIds) {
+        skeletonRootNodeId = selectedNodeId;
+        skeletonNodeIds = new Set([selectedNodeId]);
+      }
+
+      const baseGraph = getVisibleGraph(graph, null);
+      for (let i = 0; i < baseGraph.edges.length; i++) {
+        const edge = baseGraph.edges[i];
+        if (edge.from === selectedNodeId || edge.to === selectedNodeId) {
+          skeletonNodeIds.add(edge.from);
+          skeletonNodeIds.add(edge.to);
+        }
+      }
+
+      buildGraphScene(graph);
+      const refreshedNode = nodeMeta.get(selectedNodeId)?.node;
+      if (refreshedNode) {
+        setDetails(refreshedNode);
+      }
     }
 
     function setNodeHighlight(nodeId, mode = 'off') {
@@ -1481,6 +1555,7 @@ export class CircuitPanel {
     modeRuntimeBtn?.addEventListener('click', () => setViewMode('runtime'));
     collapseAllBtn?.addEventListener('click', collapseAllLayers);
     expandAllBtn?.addEventListener('click', expandAllLayers);
+    includeExternalBtn?.addEventListener('click', includeExternalNeighborsForSelected);
     hudMinBtn?.addEventListener('click', toggleHudMinimized);
     hudMaxBtn?.addEventListener('click', toggleHudMaximized);
     canvas.addEventListener('dblclick', (ev) => {
