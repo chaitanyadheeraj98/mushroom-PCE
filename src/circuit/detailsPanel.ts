@@ -317,7 +317,11 @@ function renderHtml(webview: vscode.Webview, node: CircuitNode, snippet: string,
 				.map((turn) => {
 					const css = turn.role === 'user' ? 'chat-bubble user' : 'chat-bubble assistant';
 					const label = turn.role === 'user' ? 'You' : 'Mushroom AI';
-					return `<div class="${css}"><div class="who">${label}</div><div class="msg">${esc(turn.text)}</div></div>`;
+					const messageHtml =
+						turn.role === 'assistant'
+							? markdownToChatHtml(turn.text)
+							: `<div class="msg msg-user">${esc(turn.text)}</div>`;
+					return `<div class="${css}"><div class="who">${label}</div>${messageHtml}</div>`;
 				})
 				.join('')
 		: '<div class="chat-empty">Ask anything about this node, logic, edge-cases, or improvements.</div>';
@@ -343,7 +347,42 @@ function renderHtml(webview: vscode.Webview, node: CircuitNode, snippet: string,
     .chat-bubble.user { align-self: flex-end; background: rgba(34,197,94,0.17); max-width: 86%; }
     .chat-bubble.assistant { align-self: flex-start; background: rgba(59,130,246,0.13); max-width: 92%; }
     .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-    .msg { white-space: pre-wrap; line-height: 1.45; font-size: 13px; }
+    .msg-user { white-space: pre-wrap; line-height: 1.45; font-size: 13px; }
+    .msg-markdown { line-height: 1.52; font-size: 13px; }
+    .msg-markdown p { margin: 6px 0; }
+    .msg-markdown ul, .msg-markdown ol { margin: 6px 0 6px 18px; padding: 0; }
+    .msg-markdown li { margin: 3px 0; }
+    .msg-markdown h1, .msg-markdown h2, .msg-markdown h3, .msg-markdown h4 {
+      margin: 8px 0 6px;
+      color: #f1f5f9;
+      line-height: 1.3;
+    }
+    .msg-markdown h1 { font-size: 16px; }
+    .msg-markdown h2 { font-size: 15px; }
+    .msg-markdown h3, .msg-markdown h4 { font-size: 14px; }
+    .msg-markdown code {
+      background: #0b1225;
+      border: 1px solid #21304d;
+      border-radius: 6px;
+      padding: 1px 5px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+    }
+    .msg-markdown pre {
+      background: #0b1225;
+      border: 1px solid #21304d;
+      border-radius: 8px;
+      padding: 8px;
+      overflow: auto;
+      margin: 8px 0;
+    }
+    .msg-markdown pre code {
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding: 0;
+    }
+    .msg-markdown strong { color: #f8fafc; }
     .chat-empty { color: var(--muted); font-size: 12px; }
     .ask-row { display: flex; gap: 8px; padding: 10px; border-top:1px solid var(--border); }
     textarea { flex:1; resize: vertical; min-height: 56px; max-height: 120px; border-radius: 8px; border:1px solid var(--border); background: #0b1225; color: var(--text); padding: 8px; font-family: Segoe UI, Tahoma, sans-serif; font-size: 13px; }
@@ -395,4 +434,94 @@ function getNonce(): string {
 		text += possible.charAt(Math.floor(Math.random() * possible.length));
 	}
 	return text;
+}
+
+function markdownToChatHtml(markdown: string): string {
+	const esc = (s: string) =>
+		s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+	const inline = (text: string): string => {
+		let result = esc(text);
+		result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+		result = result.replace(/`([^`]+)`/g, '<code>$1</code>');
+		return result;
+	};
+
+	const lines = (markdown || '').replace(/\r\n/g, '\n').split('\n');
+	const out: string[] = [];
+	let inCode = false;
+	let listMode: '' | 'ul' | 'ol' = '';
+
+	const closeList = () => {
+		if (listMode === 'ul') {
+			out.push('</ul>');
+		} else if (listMode === 'ol') {
+			out.push('</ol>');
+		}
+		listMode = '';
+	};
+
+	for (const rawLine of lines) {
+		const line = rawLine.trim();
+
+		if (line.startsWith('```')) {
+			closeList();
+			out.push(inCode ? '</code></pre>' : '<pre><code>');
+			inCode = !inCode;
+			continue;
+		}
+		if (inCode) {
+			out.push(`${esc(rawLine)}\n`);
+			continue;
+		}
+		if (!line) {
+			closeList();
+			continue;
+		}
+
+		if (line.startsWith('#### ')) {
+			closeList();
+			out.push(`<h4>${inline(line.slice(5))}</h4>`);
+			continue;
+		}
+		if (line.startsWith('### ')) {
+			closeList();
+			out.push(`<h3>${inline(line.slice(4))}</h3>`);
+			continue;
+		}
+		if (line.startsWith('## ')) {
+			closeList();
+			out.push(`<h2>${inline(line.slice(3))}</h2>`);
+			continue;
+		}
+		if (line.startsWith('# ')) {
+			closeList();
+			out.push(`<h1>${inline(line.slice(2))}</h1>`);
+			continue;
+		}
+		if (/^[-*]\s+/.test(line)) {
+			if (listMode !== 'ul') {
+				closeList();
+				out.push('<ul>');
+				listMode = 'ul';
+			}
+			out.push(`<li>${inline(line.replace(/^[-*]\s+/, ''))}</li>`);
+			continue;
+		}
+		if (/^\d+\.\s+/.test(line)) {
+			if (listMode !== 'ol') {
+				closeList();
+				out.push('<ol>');
+				listMode = 'ol';
+			}
+			out.push(`<li>${inline(line.replace(/^\d+\.\s+/, ''))}</li>`);
+			continue;
+		}
+
+		closeList();
+		out.push(`<p>${inline(line)}</p>`);
+	}
+
+	closeList();
+	return `<div class="msg msg-markdown">${out.join('') || '<p>No response generated.</p>'}</div>`;
 }

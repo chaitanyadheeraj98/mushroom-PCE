@@ -1,12 +1,14 @@
 import * as vscode from 'vscode';
 
-import { buildPrompt } from './prompts';
+import { requestModelText } from './ai/client';
+import { addFrequencyToListOutput } from './analysis/frequency';
+import { buildNodeDetailsPrompt, buildPrompt } from './prompts';
 import { MushroomPanel } from './panel';
 import { parseSymbolLocations } from './symbols';
-import { ModelOption, ResponseMode, SymbolLink } from './types';
-import { buildCircuitGraph } from './circuit/buildGraph';
-import { CircuitDetailsPanel } from './circuit/detailsPanel';
-import { CircuitPanel } from './circuit/panel';
+import { ResponseMode, SymbolLink } from './types';
+import { NodeChatRequest } from './circuit/detailsPanel';
+import { detectLanguageMismatchWarning } from './language/warnings';
+import { registerPceCommands } from './commands/register';
 
 export function activate(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
@@ -41,12 +43,6 @@ export function activate(context: vscode.ExtensionContext) {
 		rememberEditor(vscode.window.activeTextEditor);
 	}
 
-	const formatModelOption = (model: vscode.LanguageModelChat): ModelOption => ({
-		id: model.id,
-		label: model.name,
-		detail: `${model.vendor} / ${model.family} / ${model.version}`
-	});
-
 	const applyModelStateToPanel = (panel: MushroomPanel): void => {
 		const selected = availableModels.find((m) => m.id === selectedModelId);
 		const selectedLabel = selected ? `${selected.name} (${selected.vendor}/${selected.family})` : 'No model selected';
@@ -61,41 +57,6 @@ export function activate(context: vscode.ExtensionContext) {
 	const getCurrentDocument = (): vscode.TextDocument | undefined => {
 		const editor = vscode.window.activeTextEditor;
 		return editor?.document ?? lastDocument;
-	};
-
-	const detectLanguageMismatchWarning = (languageId: string, code: string): string | undefined => {
-		const text = code.trim();
-		if (!text) {
-			return undefined;
-		}
-
-		const normalizedLanguage = languageId.toLowerCase();
-		const isTsLike = ['typescript', 'typescriptreact', 'javascript', 'javascriptreact'].includes(normalizedLanguage);
-		const isPythonMode = normalizedLanguage === 'python';
-
-		const pythonSignals = [
-			/\bdef\s+[A-Za-z_]\w*\s*\(/,
-			/\bprint\s*\(/,
-			/\b(input|elif|None|True|False)\b/,
-			/:\s*(#.*)?$/m
-		];
-		const tsSignals = [
-			/\b(const|let|var|function|interface|type|class)\b/,
-			/=>/,
-			/[{}]/,
-			/;\s*$/m
-		];
-
-		const pythonScore = pythonSignals.reduce((acc, regex) => (regex.test(text) ? acc + 1 : acc), 0);
-		const tsScore = tsSignals.reduce((acc, regex) => (regex.test(text) ? acc + 1 : acc), 0);
-
-		if (isTsLike && pythonScore >= 2 && pythonScore > tsScore) {
-			return 'Language mode is set to TypeScript/JavaScript, but the code looks like Python. List Mode may miss symbols. Switch the file language mode for better results.';
-		}
-		if (isPythonMode && tsScore >= 2 && tsScore > pythonScore) {
-			return 'Language mode is set to Python, but the code looks like TypeScript/JavaScript. List Mode may miss symbols. Switch the file language mode for better results.';
-		}
-		return undefined;
 	};
 
 	const getCacheKey = (doc: vscode.TextDocument, modelId: string, mode: ResponseMode): string =>
@@ -237,216 +198,42 @@ export function activate(context: vscode.ExtensionContext) {
 		output.appendLine('runAnalysis completed');
 	};
 
-	const analyzeCommand = vscode.commands.registerCommand('mushroom-pce.analyzeActive', async () => {
-		output.appendLine('mushroom-pce.analyzeActive command triggered');
-		const panel = MushroomPanel.getCurrentPanel();
-		if (!panel || panel.isDisposed()) {
-			vscode.window.showInformationMessage('Run "Start Mushroom PCE" first.');
-			output.appendLine('analyzeActive failed: panel missing');
-			return;
+	const askNodeQuestion = async (request: NodeChatRequest): Promise<string> => {
+		await loadModels();
+		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+		if (!model) {
+			return 'No AI model is currently available. Open Copilot/Chat model access and try again.';
 		}
 
-		await runAnalysis(panel);
-	});
+		const prompt = buildNodeDetailsPrompt(request);
+		const responseText = await requestModelText(model, prompt);
+		return responseText || 'No response generated.';
+	};
 
-	const startCommand = vscode.commands.registerCommand('mushroom-pce.start', async () => {
-		const panel = MushroomPanel.createOrShow();
-
-		panel.setStatus('Ready');
-		panel.setExplanation('Click Analyze to explain the active file.');
-		panel.setLanguageWarning(undefined);
-		applyModeStateToPanel(panel);
-
-		if (lastDocument) {
-			applySymbolStateToPanel(panel, lastDocument);
-		}
-		await loadModels(panel);
-		output.appendLine('mushroom-pce.start command triggered');
-		await vscode.commands.executeCommand('mushroom-pce.analyzeActive');
-	});
-
-	const goToFunctionCommand = vscode.commands.registerCommand(
-		'mushroom-pce.goToFunction',
-		async (uriString?: string, line?: number, character?: number) => {
-			try {
-				if (typeof uriString !== 'string' || typeof line !== 'number' || typeof character !== 'number') {
-					return;
-				}
-
-				const targetUri = vscode.Uri.parse(uriString);
-				const existingEditor = vscode.window.visibleTextEditors
-					.filter((e) => e.document.uri.toString() === targetUri.toString())
-					.sort((a, b) => (a.viewColumn ?? 999) - (b.viewColumn ?? 999))[0];
-				const document = existingEditor
-					? existingEditor.document
-					: await vscode.workspace.openTextDocument(targetUri);
-				const editor = await vscode.window.showTextDocument(document, {
-					viewColumn: existingEditor?.viewColumn ?? lastEditorColumn ?? vscode.ViewColumn.One,
-					preserveFocus: false,
-					preview: true
-				});
-				const position = new vscode.Position(Math.max(0, line), Math.max(0, character));
-				editor.selection = new vscode.Selection(position, position);
-				editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
-				if (editor.viewColumn) {
-					lastEditorColumn = editor.viewColumn;
-				}
-			} catch (error: any) {
-				vscode.window.showErrorMessage('Could not navigate to symbol: ' + (error?.message ?? String(error)));
-			}
-		}
-	);
-
-	const selectModelCommand = vscode.commands.registerCommand('mushroom-pce.selectModel', async () => {
-		const panel = MushroomPanel.getCurrentPanel();
-		await loadModels(panel);
-
-		if (!availableModels.length) {
-			vscode.window.showErrorMessage('No AI models available to select.');
-			return;
-		}
-
-		const pickItems = availableModels.map((model) => {
-			const option = formatModelOption(model);
-			return {
-				label: option.label,
-				description: model.id === selectedModelId ? 'Current' : '',
-				detail: option.detail,
-				modelId: model.id
-			};
-		});
-
-		const picked = await vscode.window.showQuickPick(pickItems, {
-			title: 'Mushroom PCE: Select AI Model',
-			placeHolder: 'Choose the model used for code explanation'
-		});
-
-		if (!picked) {
-			return;
-		}
-
-		selectedModelId = picked.modelId;
-		if (panel && !panel.isDisposed()) {
-			applyModelStateToPanel(panel);
-			// If we have cached output for this model+mode, show it immediately.
-			await tryRestoreCachedAnalysis(panel);
-		}
-		vscode.window.showInformationMessage(`Mushroom PCE model set to: ${picked.label}`);
-		output.appendLine(`model selected: ${picked.modelId}`);
-	});
-
-	const setListModeCommand = vscode.commands.registerCommand('mushroom-pce.setListMode', async () => {
-		selectedResponseMode = 'list';
-		const panel = MushroomPanel.getCurrentPanel();
-		if (panel && !panel.isDisposed()) {
-			applyModeStateToPanel(panel);
-			await tryRestoreCachedAnalysis(panel);
-		}
-		vscode.window.showInformationMessage('Mushroom PCE mode set to List Mode');
-		output.appendLine('response mode selected: list');
-	});
-
-	const setDeveloperModeCommand = vscode.commands.registerCommand('mushroom-pce.setDeveloperMode', async () => {
-		selectedResponseMode = 'developer';
-		const panel = MushroomPanel.getCurrentPanel();
-		if (panel && !panel.isDisposed()) {
-			applyModeStateToPanel(panel);
-			await tryRestoreCachedAnalysis(panel);
-		}
-		vscode.window.showInformationMessage('Mushroom PCE mode set to Developer Mode');
-		output.appendLine('response mode selected: developer');
-	});
-
-	const openCircuitCommand = vscode.commands.registerCommand('mushroom-pce.openCircuit', async () => {
-		const doc = getCurrentDocument();
-		if (!doc) {
-			vscode.window.showInformationMessage('Open a file to visualize in Circuit Mode.');
-			return;
-		}
-
-		const graph = buildCircuitGraph(doc);
-		CircuitPanel.createOrShow(context.extensionUri, graph, async (node) => {
-			if (!node?.uri || typeof node.line !== 'number' || typeof node.character !== 'number') {
-				return;
-			}
-			// 1) Jump to code in-place
-			await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
-			// 2) Show details webview (snippet)
-			await CircuitDetailsPanel.createOrShow(node, graph, async (request) => {
-				await loadModels();
-				const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
-				if (!model) {
-					return 'No AI model is currently available. Open Copilot/Chat model access and try again.';
-				}
-
-				const historyText = request.history
-					.slice(-8)
-					.map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)
-					.join('\n');
-
-				const prompt = `
-You are Mushroom PCE's Node Details assistant.
-Answer the user's question using the node context and snippet below.
-Be clear, practical, and concise. Use markdown bullet points when helpful.
-If connection context is provided, treat it as authoritative graph evidence.
-Do not deny an edge if it appears in incoming/outgoing lists.
-
-Node:
-- label: ${request.node.label}
-- type: ${request.node.type}
-- layer: ${request.node.layer ?? 'unknown'}
-- line: ${typeof request.node.line === 'number' ? request.node.line + 1 : 'unknown'}
-- detail: ${request.node.detail ?? 'n/a'}
-
-Snippet:
-\`\`\`
-${request.snippet || '(no snippet available)'}
-\`\`\`
-
-Graph Connections:
-- Incoming:
-${request.connectionContext.incoming.length ? request.connectionContext.incoming.map((line) => `  - ${line}`).join('\n') : '  - none'}
-- Outgoing:
-${request.connectionContext.outgoing.length ? request.connectionContext.outgoing.map((line) => `  - ${line}`).join('\n') : '  - none'}
-
-Recent Chat:
-${historyText || '(no previous history)'}
-
-User Question:
-${request.question}
-`;
-
-				const messages = [new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, prompt)];
-				const response = await model.sendRequest(messages);
-				const res: any = response;
-				const streamCandidate = res?.stream ?? res;
-
-				if (streamCandidate && typeof streamCandidate[Symbol.asyncIterator] === 'function') {
-					let text = '';
-					for await (const chunk of streamCandidate) {
-						text += extractTextFromChunk(chunk);
-					}
-					return text || 'No response generated.';
-				}
-
-				if (Array.isArray(res?.content)) {
-					const text = res.content
-						.map((item: any) => (typeof item?.text === 'string' ? item.text : ''))
-						.join('');
-					return text || 'No response generated.';
-				}
-
-				if (typeof res?.text === 'string') {
-					return res.text;
-				}
-
-				if (typeof res === 'string') {
-					return res;
-				}
-
-				return JSON.stringify(res, null, 2);
-			});
-		});
+	const commandDisposables = registerPceCommands({
+		extensionUri: context.extensionUri,
+		output,
+		getCurrentDocument,
+		getLastEditorColumn: () => lastEditorColumn,
+		setLastEditorColumn: (column) => {
+			lastEditorColumn = column;
+		},
+		loadModels,
+		getAvailableModels: () => availableModels,
+		getSelectedModelId: () => selectedModelId,
+		setSelectedModelId: (id) => {
+			selectedModelId = id;
+		},
+		getSelectedResponseMode: () => selectedResponseMode,
+		setSelectedResponseMode: (mode) => {
+			selectedResponseMode = mode;
+		},
+		applyModeStateToPanel,
+		applyModelStateToPanel,
+		applySymbolStateToPanel,
+		tryRestoreCachedAnalysis,
+		runAnalysis,
+		askNodeQuestion
 	});
 
 	const statusBarAnalyze = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -481,13 +268,7 @@ ${request.question}
 	});
 
 	context.subscriptions.push(
-		startCommand,
-		analyzeCommand,
-		selectModelCommand,
-		setListModeCommand,
-		setDeveloperModeCommand,
-		goToFunctionCommand,
-		openCircuitCommand,
+		...commandDisposables,
 		statusBarAnalyze,
 		output,
 		onEditorChange,
@@ -495,62 +276,6 @@ ${request.question}
 	);
 }
 
-function addFrequencyToListOutput(markdown: string, code: string): string {
-	const lines = markdown.replace(/\r\n/g, '\n').split('\n');
-	const nextLines: string[] = [];
-
-	for (const rawLine of lines) {
-		const match = rawLine.match(/^(\s*[-*]\s+)(.+)$/);
-		if (!match) {
-			nextLines.push(rawLine);
-			continue;
-		}
-
-		const prefix = match[1];
-		const rawItem = match[2].trim();
-		if (!rawItem || rawItem === '-') {
-			nextLines.push(rawLine);
-			continue;
-		}
-
-		const cleaned = rawItem.replace(/\s+\(x\d+\)\s*$/, '').trim();
-		const count = countSymbolOccurrences(code, cleaned);
-		if (count <= 0) {
-			nextLines.push(`${prefix}${cleaned}`);
-			continue;
-		}
-
-		nextLines.push(`${prefix}${cleaned} (x${count})`);
-	}
-
-	return nextLines.join('\n');
-}
-
-function countSymbolOccurrences(code: string, symbol: string): number {
-	const text = symbol.replace(/^`|`$/g, '').trim();
-	if (!text || text === '-') {
-		return 0;
-	}
-
-	// If a line contains aliases/descriptions, focus on the first token-like chunk.
-	const baseToken = text.split(/\s+[-–—:|]/)[0].trim();
-	const needle = baseToken || text;
-	const escaped = escapeRegExp(needle);
-
-	let regex: RegExp;
-	if (/^[A-Za-z_$][\w$]*$/.test(needle)) {
-		regex = new RegExp(`\\b${escaped}\\b`, 'g');
-	} else {
-		regex = new RegExp(escaped, 'g');
-	}
-
-	const matches = code.match(regex);
-	return matches ? matches.length : 0;
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 async function explainCode(
 	model: vscode.LanguageModelChat,
@@ -561,73 +286,9 @@ async function explainCode(
 ): Promise<string | undefined> {
 	try {
 		const prompt = buildPrompt(languageId, code, responseMode);
-		const messages = [new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, prompt)];
-
-		const response = await model.sendRequest(messages);
-		const res: any = response;
-		const streamCandidate = res?.stream ?? res;
-
-		if (streamCandidate && typeof streamCandidate[Symbol.asyncIterator] === 'function') {
-			let text = '';
-			for await (const chunk of streamCandidate) {
-				const parsedChunk = extractTextFromChunk(chunk);
-				if (parsedChunk) {
-					text += parsedChunk;
-					onChunk?.(parsedChunk);
-				}
-			}
-			return text;
-		}
-
-		if (Array.isArray(res?.content)) {
-			let text = '';
-			for (const item of res.content) {
-				if (typeof item?.text === 'string') {
-					text += item.text;
-				}
-			}
-			return text;
-		}
-
-		if (typeof res?.text === 'string') {
-			return res.text;
-		}
-
-		if (typeof res === 'string') {
-			return res;
-		}
-
-		return JSON.stringify(res, null, 2);
+		return await requestModelText(model, prompt, onChunk);
 	} catch (error: any) {
 		vscode.window.showErrorMessage('Error: ' + error.message);
 		return;
 	}
-}
-
-function extractTextFromChunk(chunk: unknown): string {
-	if (typeof chunk === 'string') {
-		return chunk;
-	}
-
-	if (!chunk || typeof chunk !== 'object') {
-		return '';
-	}
-
-	const maybeText = (chunk as any).text;
-	if (typeof maybeText === 'string') {
-		return maybeText;
-	}
-
-	const maybeValue = (chunk as any).value;
-	if (typeof maybeValue === 'string') {
-		return maybeValue;
-	}
-
-	if (Array.isArray((chunk as any).content)) {
-		return (chunk as any).content
-			.map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
-			.join('');
-	}
-
-	return '';
 }

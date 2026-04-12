@@ -163,3 +163,60 @@ ${code}
 	return responseMode === 'list' ? listPrompt : developerPrompt;
 }
 
+type NodePromptRequest = {
+	node: {
+		label: string;
+		type: string;
+		layer?: string;
+		line?: number;
+		detail?: string;
+	};
+	snippet: string;
+	question: string;
+	history: Array<{ role: 'user' | 'assistant'; text: string }>;
+	connectionContext: {
+		incoming: string[];
+		outgoing: string[];
+	};
+};
+
+export function buildNodeDetailsPrompt(request: NodePromptRequest): string {
+	const historyText = request.history
+		.slice(-8)
+		.map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)
+		.join('\n');
+
+	return `
+	
+You are Mushroom PCE's Node Details assistant.
+Answer the user's question using the node context and snippet below.
+Be clear, practical, and concise. Use markdown bullet points when helpful.
+If connection context is provided, treat it as authoritative graph evidence.
+Do not deny an edge if it appears in incoming/outgoing lists.
+
+Node:
+- label: ${request.node.label}
+- type: ${request.node.type}
+- layer: ${request.node.layer ?? 'unknown'}
+- line: ${typeof request.node.line === 'number' ? request.node.line + 1 : 'unknown'}
+- detail: ${request.node.detail ?? 'n/a'}
+
+Snippet:
+\`\`\`
+${request.snippet || '(no snippet available)'}
+\`\`\`
+
+Graph Connections:
+- Incoming:
+${request.connectionContext.incoming.length ? request.connectionContext.incoming.map((line) => `  - ${line}`).join('\n') : '  - none'}
+- Outgoing:
+${request.connectionContext.outgoing.length ? request.connectionContext.outgoing.map((line) => `  - ${line}`).join('\n') : '  - none'}
+
+Recent Chat:
+${historyText || '(no previous history)'}
+
+User Question:
+${request.question}
+`;
+}
+
