@@ -142,27 +142,55 @@ export class CircuitPanel {
       display: flex; justify-content: space-between; gap: 12px; pointer-events: none;
     }
     #hudControls {
+      position: absolute;
+      top: 0;
+      right: 0;
       pointer-events: auto;
       display: flex;
-      gap: 8px;
+      gap: 4px;
       align-items: center;
-      align-self: flex-start;
+      z-index: 20;
+      background: rgba(11, 18, 37, 0.86);
+      border: 1px solid rgba(33, 48, 77, 0.95);
+      border-radius: 10px;
+      padding: 3px;
+      backdrop-filter: blur(8px);
     }
     .hud-control-btn {
-      border: 1px solid rgba(33, 48, 77, 0.95);
-      background: rgba(11, 18, 37, 0.86);
-      color: #cbd5e1;
-      border-radius: 8px;
-      font-size: 11px;
+      width: 30px;
+      height: 26px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: #dbeafe;
+      border-radius: 7px;
+      font-size: 13px;
       font-weight: 700;
-      padding: 6px 10px;
+      line-height: 1;
       cursor: pointer;
       pointer-events: auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+    }
+    .hud-control-btn:hover {
+      background: rgba(59, 130, 246, 0.2);
+      border-color: rgba(147, 197, 253, 0.45);
+      transform: translateY(-0.5px);
     }
     .hud-control-btn.active {
       border-color: rgba(34, 197, 94, 0.9);
       background: rgba(22, 163, 74, 0.26);
       color: #dcfce7;
+    }
+    .hud-control-btn:disabled {
+      opacity: 0.5;
+      cursor: default;
+      transform: none;
+    }
+    .hud-control-btn-icon {
+      transform: translateY(-1px);
+      user-select: none;
     }
     body.hud-minimized #hud .hud-main-card,
     body.hud-minimized #hud .hud-selection-card {
@@ -174,6 +202,10 @@ export class CircuitPanel {
     }
     body.hud-maximized #hud .hud-selection-card {
       max-width: 760px;
+    }
+    body.hud-minimized #hudControls {
+      right: auto;
+      left: 0;
     }
     .card {
       pointer-events: none;
@@ -272,9 +304,13 @@ export class CircuitPanel {
 </head>
 <body>
   <div id="hud">
-    <div id="hudControls" class="card">
-      <button id="hudMinBtn" class="hud-control-btn">Minimize HUD</button>
-      <button id="hudMaxBtn" class="hud-control-btn">Maximize HUD</button>
+    <div id="hudControls">
+      <button id="hudMinBtn" class="hud-control-btn" title="Minimize HUD" aria-label="Minimize HUD">
+        <span class="hud-control-btn-icon">−</span>
+      </button>
+      <button id="hudMaxBtn" class="hud-control-btn" title="Maximize HUD" aria-label="Maximize HUD">
+        <span class="hud-control-btn-icon">▢</span>
+      </button>
     </div>
     <div class="card hud-main-card">
       <div class="title">Circuit Mode</div>
@@ -1173,12 +1209,22 @@ export class CircuitPanel {
       document.body.classList.toggle('hud-minimized', hudMinimized);
       document.body.classList.toggle('hud-maximized', hudMaximized);
       if (hudMinBtn) {
-        hudMinBtn.textContent = hudMinimized ? 'Show HUD' : 'Minimize HUD';
         hudMinBtn.classList.toggle('active', hudMinimized);
+        hudMinBtn.title = hudMinimized ? 'Restore HUD' : 'Minimize HUD';
+        hudMinBtn.setAttribute('aria-label', hudMinimized ? 'Restore HUD' : 'Minimize HUD');
+        const minIcon = hudMinBtn.querySelector('.hud-control-btn-icon');
+        if (minIcon) {
+          minIcon.textContent = hudMinimized ? '▣' : '−';
+        }
       }
       if (hudMaxBtn) {
-        hudMaxBtn.textContent = hudMaximized ? 'Normal HUD' : 'Maximize HUD';
         hudMaxBtn.classList.toggle('active', hudMaximized);
+        hudMaxBtn.title = hudMaximized ? 'Normalize HUD' : 'Maximize HUD';
+        hudMaxBtn.setAttribute('aria-label', hudMaximized ? 'Normalize HUD' : 'Maximize HUD');
+        const maxIcon = hudMaxBtn.querySelector('.hud-control-btn-icon');
+        if (maxIcon) {
+          maxIcon.textContent = hudMaximized ? '❐' : '▢';
+        }
         hudMaxBtn.disabled = hudMinimized;
       }
       persistUiState();
