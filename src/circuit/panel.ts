@@ -8,13 +8,23 @@ export class CircuitPanel {
 	private readonly extensionUri: vscode.Uri;
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly onNavigate?: (node: CircuitNode) => Promise<void>;
+	private readonly onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>;
+	private readonly onRequestGraph?: (
+		scope: 'current-file' | 'full-architecture' | 'codeflow',
+		currentGraph: CircuitGraph
+	) => Promise<CircuitGraph | undefined>;
 	private graph: CircuitGraph;
 	private readonly isPrimaryPanel: boolean;
 
 	static createOrShow(
 		extensionUri: vscode.Uri,
 		graph: CircuitGraph,
-		onNavigate?: (node: CircuitNode) => Promise<void>
+		onNavigate?: (node: CircuitNode) => Promise<void>,
+		onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>,
+		onRequestGraph?: (
+			scope: 'current-file' | 'full-architecture' | 'codeflow',
+			currentGraph: CircuitGraph
+		) => Promise<CircuitGraph | undefined>
 	): CircuitPanel {
 		if (CircuitPanel.currentPanel) {
 			CircuitPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
@@ -29,7 +39,7 @@ export class CircuitPanel {
 			localResourceRoots: [extensionUri, vscode.Uri.joinPath(extensionUri, 'node_modules')]
 		});
 
-		CircuitPanel.currentPanel = new CircuitPanel(panel, extensionUri, graph, onNavigate, {
+		CircuitPanel.currentPanel = new CircuitPanel(panel, extensionUri, graph, onNavigate, onBuildSkeletonGraph, onRequestGraph, {
 			isPrimaryPanel: true
 		});
 		return CircuitPanel.currentPanel;
@@ -40,12 +50,19 @@ export class CircuitPanel {
 		extensionUri: vscode.Uri,
 		graph: CircuitGraph,
 		onNavigate?: (node: CircuitNode) => Promise<void>,
+		onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>,
+		onRequestGraph?: (
+			scope: 'current-file' | 'full-architecture' | 'codeflow',
+			currentGraph: CircuitGraph
+		) => Promise<CircuitGraph | undefined>,
 		options?: { initialSkeletonRootNodeId?: string; initialViewMode?: 'architecture' | 'runtime'; isPrimaryPanel?: boolean }
 	) {
 		this.panel = panel;
 		this.extensionUri = extensionUri;
 		this.graph = graph;
 		this.onNavigate = onNavigate;
+		this.onBuildSkeletonGraph = onBuildSkeletonGraph;
+		this.onRequestGraph = onRequestGraph;
 		this.isPrimaryPanel = options?.isPrimaryPanel ?? false;
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 		this.panel.webview.onDidReceiveMessage(
@@ -55,7 +72,25 @@ export class CircuitPanel {
 					return;
 				}
 				if (msg?.type === 'openSkeleton' && typeof msg?.nodeId === 'string') {
-					this.openSkeletonPanel(msg.nodeId, typeof msg?.label === 'string' ? msg.label : undefined);
+					await this.openSkeletonPanel(msg.nodeId, typeof msg?.label === 'string' ? msg.label : undefined);
+					return;
+				}
+				if (
+					msg?.type === 'requestGraph' &&
+					this.onRequestGraph &&
+					(msg?.scope === 'current-file' || msg?.scope === 'full-architecture' || msg?.scope === 'codeflow')
+				) {
+					const nextGraph = await this.onRequestGraph(msg.scope, this.graph);
+					if (nextGraph) {
+						this.setGraph(nextGraph);
+					}
+					return;
+				}
+				if (msg?.type === 'viewNode' && typeof msg?.nodeId === 'string' && this.onNavigate) {
+					const node = this.graph.nodes.find((item) => item.id === msg.nodeId);
+					if (node) {
+						await this.onNavigate(node);
+					}
 				}
 			},
 			null,
@@ -81,20 +116,42 @@ export class CircuitPanel {
 		this.panel.webview.postMessage({ type: 'graph', graph });
 	}
 
-	private openSkeletonPanel(rootNodeId: string, nodeLabel?: string): void {
+	private async openSkeletonPanel(rootNodeId: string, nodeLabel?: string): Promise<void> {
 		const title = nodeLabel
 			? `Mushroom PCE: Skeleton - ${nodeLabel}`
 			: 'Mushroom PCE: Skeleton';
+		let graphForSkeleton = this.graph;
+		if (this.onBuildSkeletonGraph) {
+			const rootNode = this.graph.nodes.find((node) => node.id === rootNodeId);
+			if (rootNode) {
+				try {
+					const built = await this.onBuildSkeletonGraph(rootNode, this.graph);
+					if (built && built.nodes.length) {
+						graphForSkeleton = built;
+					}
+				} catch {
+					// Keep fallback graph if global skeleton build fails.
+				}
+			}
+		}
 		const panel = vscode.window.createWebviewPanel('mushroomPceCircuitSkeleton', title, vscode.ViewColumn.Beside, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
 			localResourceRoots: [this.extensionUri, vscode.Uri.joinPath(this.extensionUri, 'node_modules')]
 		});
-		new CircuitPanel(panel, this.extensionUri, this.graph, this.onNavigate, {
+		new CircuitPanel(
+			panel,
+			this.extensionUri,
+			graphForSkeleton,
+			this.onNavigate,
+			this.onBuildSkeletonGraph,
+			this.onRequestGraph,
+			{
 			initialSkeletonRootNodeId: rootNodeId,
 			initialViewMode: 'runtime',
 			isPrimaryPanel: false
-		});
+			}
+		);
 	}
 
 	private getHtml(
@@ -330,6 +387,14 @@ export class CircuitPanel {
         <button id="collapseAllBtn" class="mini-btn">Collapse All</button>
         <button id="expandAllBtn" class="mini-btn">Expand All</button>
       </div>
+      <div class="mode-row">
+        <button id="fullArchitectureBtn" class="mini-btn">Full Architecture</button>
+        <button id="currentFileBtn" class="mini-btn">Current File</button>
+        <button id="codeFlowBtn" class="mini-btn">CodeFlow</button>
+      </div>
+      <div class="mode-row">
+        <button id="edgeFilterBtn" class="mini-btn">Edges: All</button>
+      </div>
       <div id="modeHint">Architecture view: grouped by layers.</div>
     </div>
     <div class="card hud-selection-card" style="max-width: 520px;">
@@ -364,6 +429,10 @@ export class CircuitPanel {
     const modeRuntimeBtn = document.getElementById('modeRuntime');
     const collapseAllBtn = document.getElementById('collapseAllBtn');
     const expandAllBtn = document.getElementById('expandAllBtn');
+    const fullArchitectureBtn = document.getElementById('fullArchitectureBtn');
+    const currentFileBtn = document.getElementById('currentFileBtn');
+    const codeFlowBtn = document.getElementById('codeFlowBtn');
+    const edgeFilterBtn = document.getElementById('edgeFilterBtn');
     const includeExternalBtn = document.getElementById('includeExternalBtn');
     const modeHint = document.getElementById('modeHint');
     const hudMinBtn = document.getElementById('hudMinBtn');
@@ -375,6 +444,7 @@ export class CircuitPanel {
     const collapsedLayers = new Set();
     let skeletonRootNodeId = ${initialSkeletonRootNodeIdJson};
     let skeletonNodeIds = null; // Set<string> | null
+    let edgeFilterMode = 'all'; // 'all' | 'api-high'
     let menuNodeId = null;
     let hudMinimized = false;
     let hudMaximized = false;
@@ -391,6 +461,9 @@ export class CircuitPanel {
             collapsedLayers.add(key);
           }
         }
+      }
+      if (saved && (saved.edgeFilterMode === 'all' || saved.edgeFilterMode === 'api-high')) {
+        edgeFilterMode = saved.edgeFilterMode;
       }
       hudMinimized = !!saved?.hudMinimized;
       hudMaximized = !!saved?.hudMaximized;
@@ -637,9 +710,9 @@ export class CircuitPanel {
       const allowedNodeIds = new Set();
       for (let i = 0; i < g.nodes.length; i++) {
         const node = g.nodes[i];
-        const includeInArchitecture = node.type === 'layer' || node.type === 'function';
-        const includeInRuntime = node.type === 'function' || node.type === 'sink';
-        const layerCollapsed = viewMode === 'architecture' && node.type === 'function' && node.layer && collapsedLayers.has(node.layer);
+        const includeInArchitecture = node.type !== 'sink';
+        const includeInRuntime = node.type === 'function' || node.type === 'sink' || node.type === 'module';
+        const layerCollapsed = viewMode === 'architecture' && node.type !== 'layer' && node.layer && collapsedLayers.has(node.layer);
         const inSkeleton = !activeSkeleton || activeSkeleton.has(node.id);
         const shouldInclude =
           (viewMode === 'architecture' ? includeInArchitecture : includeInRuntime) &&
@@ -657,10 +730,47 @@ export class CircuitPanel {
         const isArchitectureEdge = edge.kind === 'architecture';
         const includeEdge = viewMode === 'architecture' ? isArchitectureEdge : !isArchitectureEdge;
         if (!includeEdge) continue;
+        if (edgeFilterMode === 'api-high' && !edgeIsApiHigh(edge)) continue;
         if (!allowedNodeIds.has(edge.from) || !allowedNodeIds.has(edge.to)) continue;
         visibleEdges.push(edge);
       }
       return { nodes: visibleNodes, edges: visibleEdges };
+    }
+
+    function edgeIsApiHigh(edge) {
+      return String(edge?.label || '').toLowerCase().includes('[api-high]');
+    }
+
+    function isCodeFlowEdge(edge) {
+      return String(edge?.label || '').toLowerCase().includes('[codeflow]');
+    }
+
+    function isCodeFlowGraph(g) {
+      for (let i = 0; i < g.edges.length; i++) {
+        if (isCodeFlowEdge(g.edges[i])) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function getNextCodeFlowNodeId(nodeId) {
+      const outgoing = graph.edges.filter((edge) => edge.from === nodeId && isCodeFlowEdge(edge));
+      if (!outgoing.length) {
+        return null;
+      }
+      const withTarget = outgoing
+        .map((edge) => ({ edge, node: graph.nodes.find((item) => item.id === edge.to) }))
+        .filter((item) => !!item.node);
+      if (!withTarget.length) {
+        return null;
+      }
+      withTarget.sort((a, b) => {
+        const la = typeof a.node.line === 'number' ? a.node.line : Number.MAX_SAFE_INTEGER;
+        const lb = typeof b.node.line === 'number' ? b.node.line : Number.MAX_SAFE_INTEGER;
+        return la - lb;
+      });
+      return withTarget[0].node.id;
     }
 
     function layoutNodes(nodes) {
@@ -1273,6 +1383,7 @@ export class CircuitPanel {
         vscode?.setState?.({
           viewMode: viewMode,
           collapsedLayers: Array.from(collapsedLayers),
+          edgeFilterMode: edgeFilterMode,
           hudMinimized: hudMinimized,
           hudMaximized: hudMaximized
         });
@@ -1327,11 +1438,14 @@ export class CircuitPanel {
       if (modeRuntimeBtn) {
         modeRuntimeBtn.classList.toggle('active', viewMode === 'runtime');
       }
+      if (edgeFilterBtn) {
+        edgeFilterBtn.textContent = edgeFilterMode === 'api-high' ? 'Edges: API-high' : 'Edges: All';
+      }
       if (modeHint) {
         modeHint.textContent =
           viewMode === 'architecture'
-            ? 'Architecture view: grouped by layers. Click a layer to collapse.'
-            : 'Runtime view: function call/data-flow with ports and animated movement.';
+            ? ('Architecture view: grouped by layers. Click a layer to collapse. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'))
+            : ('Runtime view: function call/data-flow with ports and animated movement. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
       }
       if (collapseAllBtn) {
         collapseAllBtn.disabled = viewMode !== 'architecture';
@@ -1340,6 +1454,60 @@ export class CircuitPanel {
         expandAllBtn.disabled = viewMode !== 'architecture';
       }
       persistUiState();
+    }
+
+    function toggleEdgeFilterMode() {
+      edgeFilterMode = edgeFilterMode === 'api-high' ? 'all' : 'api-high';
+      updateModeUi();
+      buildGraphScene(graph);
+      setDetails(selectedNodeId ? (nodeMeta.get(selectedNodeId)?.node || null) : null);
+    }
+
+    async function requestGraphScope(scope) {
+      if (!vscode) {
+        return;
+      }
+      if (scope === 'full-architecture') {
+        skeletonRootNodeId = null;
+        skeletonNodeIds = null;
+        setViewMode('architecture');
+      }
+      if (scope === 'codeflow') {
+        skeletonRootNodeId = null;
+        skeletonNodeIds = null;
+        setViewMode('runtime');
+      }
+      if (scope === 'current-file' && viewMode === 'architecture') {
+        // Keep current mode, but reset collapsed state so users see nodes immediately.
+        collapsedLayers.clear();
+      }
+      const targetBtn = scope === 'full-architecture' ? fullArchitectureBtn : currentFileBtn;
+      const otherBtns = [fullArchitectureBtn, currentFileBtn, codeFlowBtn].filter((btn) => btn && btn !== targetBtn);
+      const previous = targetBtn?.textContent || '';
+      if (targetBtn) {
+        targetBtn.textContent = 'Loading...';
+        targetBtn.disabled = true;
+      }
+      for (let i = 0; i < otherBtns.length; i++) {
+        otherBtns[i].disabled = true;
+      }
+      vscode.postMessage({ type: 'requestGraph', scope });
+      // unlock locally after small grace period; host will push graph when ready.
+      setTimeout(() => {
+        if (targetBtn) {
+          targetBtn.textContent =
+            previous ||
+            (scope === 'full-architecture'
+              ? 'Full Architecture'
+              : scope === 'codeflow'
+                ? 'CodeFlow'
+                : 'Current File');
+          targetBtn.disabled = false;
+        }
+        for (let i = 0; i < otherBtns.length; i++) {
+          otherBtns[i].disabled = false;
+        }
+      }, 1200);
     }
 
     function collapseAllLayers() {
@@ -1518,8 +1686,23 @@ export class CircuitPanel {
           } else {
             setDetails(node);
           }
-          if (node && vscode && (node.type === 'function' || node.type === 'sink')) {
+          if (node && vscode && (node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility')) {
             vscode.postMessage({ type: 'navigate', node: node });
+          }
+
+          // CodeFlow behavior: clicking current step advances focus to next step.
+          if (node && viewMode === 'runtime' && isCodeFlowGraph(graph)) {
+            const nextId = getNextCodeFlowNodeId(node.id);
+            if (nextId && nextId !== node.id) {
+              selectedNodeId = nextId;
+              const nextNode = nodeMeta.get(nextId)?.node;
+              if (nextNode) {
+                setDetails(nextNode);
+                if (vscode) {
+                  vscode.postMessage({ type: 'navigate', node: nextNode });
+                }
+              }
+            }
           }
         } else if (meta) {
           manualNodePositions.set(nodeId, meta.group.position.clone());
@@ -1555,6 +1738,10 @@ export class CircuitPanel {
     modeRuntimeBtn?.addEventListener('click', () => setViewMode('runtime'));
     collapseAllBtn?.addEventListener('click', collapseAllLayers);
     expandAllBtn?.addEventListener('click', expandAllLayers);
+    fullArchitectureBtn?.addEventListener('click', () => requestGraphScope('full-architecture'));
+    currentFileBtn?.addEventListener('click', () => requestGraphScope('current-file'));
+    codeFlowBtn?.addEventListener('click', () => requestGraphScope('codeflow'));
+    edgeFilterBtn?.addEventListener('click', toggleEdgeFilterMode);
     includeExternalBtn?.addEventListener('click', includeExternalNeighborsForSelected);
     hudMinBtn?.addEventListener('click', toggleHudMinimized);
     hudMaxBtn?.addEventListener('click', toggleHudMaximized);
@@ -1712,6 +1899,16 @@ export class CircuitPanel {
         hideNodeMenu();
       });
       nodeMenu.appendChild(pinInfoBtn);
+
+      const viewCodeBtn = document.createElement('button');
+      viewCodeBtn.textContent = 'View Code';
+      viewCodeBtn.addEventListener('click', () => {
+        if (vscode) {
+          vscode.postMessage({ type: 'viewNode', nodeId: nodeId });
+        }
+        hideNodeMenu();
+      });
+      nodeMenu.appendChild(viewCodeBtn);
 
       nodeMenu.style.left = Math.max(8, x + 8) + 'px';
       nodeMenu.style.top = Math.max(8, y + 8) + 'px';

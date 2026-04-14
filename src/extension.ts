@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 import { requestModelText } from './ai/client';
-import { addFrequencyToListOutput } from './analysis/frequency';
+import { buildListModeOutput } from './analysis/listMode';
 import { buildNodeDetailsPrompt, buildPrompt } from './prompts';
 import { MushroomPanel } from './panel';
 import { parseSymbolLocations } from './symbols';
@@ -59,8 +59,10 @@ export function activate(context: vscode.ExtensionContext) {
 		return editor?.document ?? lastDocument;
 	};
 
-	const getCacheKey = (doc: vscode.TextDocument, modelId: string, mode: ResponseMode): string =>
-		`${doc.uri.toString()}::${modelId}::${mode}`;
+	const getCacheKey = (doc: vscode.TextDocument, mode: ResponseMode, modelId?: string): string => {
+		const keyModel = mode === 'list' ? 'local-list' : modelId ?? 'no-model';
+		return `${doc.uri.toString()}::${keyModel}::${mode}`;
+	};
 
 	const tryRestoreCachedAnalysis = async (panel: MushroomPanel): Promise<boolean> => {
 		if (panel.isDisposed()) {
@@ -72,13 +74,17 @@ export function activate(context: vscode.ExtensionContext) {
 			return false;
 		}
 
-		await loadModels(panel);
-		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
-		if (!model) {
-			return false;
+		let modelIdForCache: string | undefined;
+		if (selectedResponseMode !== 'list') {
+			await loadModels(panel);
+			const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+			if (!model) {
+				return false;
+			}
+			modelIdForCache = model.id;
 		}
 
-		const key = getCacheKey(doc, model.id, selectedResponseMode);
+		const key = getCacheKey(doc, selectedResponseMode, modelIdForCache);
 		const cached = analysisCache.get(key);
 		if (!cached) {
 			return false;
@@ -157,39 +163,46 @@ export function activate(context: vscode.ExtensionContext) {
 		panel.setStatus('Analyzing...');
 		output.appendLine(`Analyzing mode=${selectedResponseMode}, language=${document.languageId}, chars=${code.length}`);
 
-		await loadModels(panel);
-		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
-		if (!model) {
-			panel.setAnalyzing(false);
-			panel.setStatus('No model available');
-			panel.setExplanation('No AI model is currently available. Open Copilot/Chat model access and try again.');
-			output.appendLine('runAnalysis aborted: no model available');
-			return;
-		}
-		output.appendLine(`using model id=${model.id}`);
+		let finalExplanation: string | undefined;
+		let cacheModelId: string | undefined;
+		if (selectedResponseMode === 'list') {
+			output.appendLine('using deterministic list mode (no AI call)');
+			finalExplanation = await buildListModeOutput(document);
+		} else {
+			await loadModels(panel);
+			const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+			if (!model) {
+				panel.setAnalyzing(false);
+				panel.setStatus('No model available');
+				panel.setExplanation('No AI model is currently available. Open Copilot/Chat model access and try again.');
+				output.appendLine('runAnalysis aborted: no model available');
+				return;
+			}
+			cacheModelId = model.id;
+			output.appendLine(`using model id=${model.id}`);
 
-		let streamed = false;
-		const explanation = await explainCode(model, code, document.languageId, selectedResponseMode, (chunk) => {
+			const explanation = await explainCode(model, code, document.languageId, selectedResponseMode, (chunk) => {
+				if (runId !== latestRunId || panel.isDisposed()) {
+					return;
+				}
+				panel.appendChunk(chunk);
+			});
+
 			if (runId !== latestRunId || panel.isDisposed()) {
 				return;
 			}
-			streamed = true;
-			panel.appendChunk(chunk);
-		});
+
+			finalExplanation = explanation;
+		}
 
 		if (runId !== latestRunId || panel.isDisposed()) {
 			return;
 		}
 
-		const finalExplanation =
-			selectedResponseMode === 'list' && explanation
-				? addFrequencyToListOutput(explanation, code)
-				: explanation;
-
 		panel.setExplanation(finalExplanation || 'No explanation generated.');
 
 		if (finalExplanation) {
-			const cacheKey = getCacheKey(document, model.id, selectedResponseMode);
+			const cacheKey = getCacheKey(document, selectedResponseMode, cacheModelId);
 			analysisCache.set(cacheKey, { text: finalExplanation, updatedAt: Date.now(), docVersion: document.version });
 		}
 

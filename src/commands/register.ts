@@ -1,8 +1,11 @@
 import * as vscode from 'vscode';
 
 import { CircuitDetailsPanel, NodeChatRequest } from '../circuit/detailsPanel';
-import { buildCircuitGraph } from '../circuit/buildGraph';
+import { buildCodeFlowGraph } from '../circuit/buildCodeFlowGraph';
+import { buildCircuitGraphHybrid } from '../circuit/buildGraphHybrid';
+import { buildProjectArchitectureGraph } from '../circuit/buildProjectArchitectureGraph';
 import { CircuitPanel } from '../circuit/panel';
+import { buildGlobalSkeletonGraph } from '../circuit/buildSkeletonGraph';
 import { MushroomPanel } from '../panel';
 import { ResponseMode } from '../types';
 
@@ -152,14 +155,36 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 			return;
 		}
 
-		const graph = buildCircuitGraph(doc);
-		CircuitPanel.createOrShow(deps.extensionUri, graph, async (node) => {
-			if (!node?.uri || typeof node.line !== 'number' || typeof node.character !== 'number') {
-				return;
+		const graph = await buildCircuitGraphHybrid(doc);
+		CircuitPanel.createOrShow(
+			deps.extensionUri,
+			graph,
+			async (node) => {
+				if (!node?.uri || typeof node.line !== 'number' || typeof node.character !== 'number') {
+					return;
+				}
+				await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
+				await CircuitDetailsPanel.createOrShow(node, graph, deps.askNodeQuestion);
+			},
+			async (node, currentGraph) => buildGlobalSkeletonGraph(node, currentGraph, 3),
+			async (scope) => {
+				if (scope === 'full-architecture') {
+					return buildProjectArchitectureGraph(doc.uri);
+				}
+				if (scope === 'codeflow') {
+					const currentDoc = deps.getCurrentDocument();
+					if (!currentDoc) {
+						return undefined;
+					}
+					return buildCodeFlowGraph(currentDoc);
+				}
+				const currentDoc = deps.getCurrentDocument();
+				if (!currentDoc) {
+					return undefined;
+				}
+				return buildCircuitGraphHybrid(currentDoc);
 			}
-			await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
-			await CircuitDetailsPanel.createOrShow(node, graph, deps.askNodeQuestion);
-		});
+		);
 	});
 
 	return [

@@ -136,7 +136,7 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 		addFunctionNode(fn);
 	}
 
-	const hasTopLevelExecutable = sourceFile.statements.some((statement) => !isFunctionHostStatement(statement));
+	const hasTopLevelExecutable = sourceFile.statements.some((statement) => isRuntimeTopLevelStatement(statement));
 	let topLevelFn: FunctionInfo | undefined;
 	if (hasTopLevelExecutable) {
 		topLevelFn = {
@@ -171,6 +171,12 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 		});
 	}
 
+	// Declaration-only files (types/interfaces/enums/import-export maps) still need
+	// a meaningful runtime visualization for beginners.
+	if (!functions.length && !hasTopLevelExecutable) {
+		buildDeclarationFlow(document, sourceFile, nodeById, addEdge);
+	}
+
 	if (!consoleSinkCreated) {
 		nodeById.delete('sink:console.log');
 	}
@@ -178,6 +184,105 @@ export function buildCircuitGraph(document: vscode.TextDocument): CircuitGraph {
 	buildArchitectureHierarchy(nodeById, addEdge);
 
 	return { nodes: [...nodeById.values()], edges };
+}
+
+function buildDeclarationFlow(
+	document: vscode.TextDocument,
+	sourceFile: ts.SourceFile,
+	nodeById: Map<string, CircuitNode>,
+	addEdge: (from: string, to: string, fromPort?: string, toPort?: string, label?: string, kind?: 'architecture' | 'runtime') => void
+): void {
+	const uri = document.uri.toString();
+	const fileNodeId = `module:file:${uri}`;
+	const fileNode: CircuitNode = {
+		id: fileNodeId,
+		type: 'module',
+		layer: 'feature',
+		label: 'file',
+		uri,
+		line: 0,
+		character: 0,
+		detail: 'declaration-only file (no executable runtime statements)'
+	};
+	nodeById.set(fileNodeId, fileNode);
+
+	let importCount = 0;
+	let typeCount = 0;
+	let exportCount = 0;
+
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement) || ts.isImportEqualsDeclaration(statement)) {
+			importCount++;
+		}
+		if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)) {
+			exportCount++;
+		}
+		if (
+			ts.isTypeAliasDeclaration(statement) ||
+			ts.isInterfaceDeclaration(statement) ||
+			ts.isEnumDeclaration(statement) ||
+			ts.isModuleDeclaration(statement)
+		) {
+			typeCount++;
+			if (hasExportModifier(statement.modifiers)) {
+				exportCount++;
+			}
+		}
+	}
+
+	const importNodeId = `module:imports:${uri}`;
+	const typesNodeId = `module:types:${uri}`;
+	const exportsNodeId = `module:exports:${uri}`;
+
+	if (importCount > 0) {
+		nodeById.set(importNodeId, {
+			id: importNodeId,
+			type: 'module',
+			layer: 'utility',
+			label: `imports (${importCount})`,
+			uri,
+			detail: 'type/value dependencies imported by this file'
+		});
+		addEdge(fileNodeId, importNodeId, undefined, undefined, 'imports', 'runtime');
+	}
+
+	if (typeCount > 0) {
+		nodeById.set(typesNodeId, {
+			id: typesNodeId,
+			type: 'module',
+			layer: 'state',
+			label: `types (${typeCount})`,
+			uri,
+			detail: 'interfaces, type aliases, enums, and declarations'
+		});
+		addEdge(fileNodeId, typesNodeId, undefined, undefined, 'declares', 'runtime');
+	}
+
+	if (exportCount > 0) {
+		nodeById.set(exportsNodeId, {
+			id: exportsNodeId,
+			type: 'module',
+			layer: 'ui',
+			label: `exports (${exportCount})`,
+			uri,
+			detail: 'public API surface from this file'
+		});
+		addEdge(fileNodeId, exportsNodeId, undefined, undefined, 'exposes', 'runtime');
+	}
+
+	if (importCount > 0 && typeCount > 0) {
+		addEdge(importNodeId, typesNodeId, undefined, undefined, 'feeds', 'runtime');
+	}
+	if (typeCount > 0 && exportCount > 0) {
+		addEdge(typesNodeId, exportsNodeId, undefined, undefined, 'publishes', 'runtime');
+	}
+}
+
+function hasExportModifier(modifiers: ts.NodeArray<ts.ModifierLike> | undefined): boolean {
+	if (!modifiers) {
+		return false;
+	}
+	return modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
 }
 
 function classifyFunctionLayer(name: string): CircuitLayer {
@@ -543,6 +648,46 @@ function isFunctionHostStatement(statement: ts.Statement): boolean {
 			ts.isIdentifier(declaration.name) &&
 			!!declaration.initializer &&
 			(ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
+	);
+}
+
+function isRuntimeTopLevelStatement(statement: ts.Statement): boolean {
+	// Declarations and imports/exports are structure, not executable runtime flow.
+	if (
+		ts.isImportDeclaration(statement) ||
+		ts.isImportEqualsDeclaration(statement) ||
+		ts.isExportDeclaration(statement) ||
+		ts.isExportAssignment(statement) ||
+		ts.isInterfaceDeclaration(statement) ||
+		ts.isTypeAliasDeclaration(statement) ||
+		ts.isModuleDeclaration(statement) ||
+		ts.isFunctionDeclaration(statement) ||
+		ts.isClassDeclaration(statement) ||
+		ts.isEnumDeclaration(statement)
+	) {
+		return false;
+	}
+
+	// Variable statements are runtime only when they have actual initializers.
+	if (ts.isVariableStatement(statement)) {
+		return statement.declarationList.declarations.some((declaration) => !!declaration.initializer);
+	}
+
+	// Expression/flow statements are executable.
+	return (
+		ts.isExpressionStatement(statement) ||
+		ts.isIfStatement(statement) ||
+		ts.isForStatement(statement) ||
+		ts.isForInStatement(statement) ||
+		ts.isForOfStatement(statement) ||
+		ts.isWhileStatement(statement) ||
+		ts.isDoStatement(statement) ||
+		ts.isSwitchStatement(statement) ||
+		ts.isTryStatement(statement) ||
+		ts.isThrowStatement(statement) ||
+		ts.isWithStatement(statement) ||
+		ts.isLabeledStatement(statement) ||
+		ts.isDebuggerStatement(statement)
 	);
 }
 
