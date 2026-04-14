@@ -7,7 +7,7 @@ export class CircuitPanel {
 	private readonly panel: vscode.WebviewPanel;
 	private readonly extensionUri: vscode.Uri;
 	private readonly disposables: vscode.Disposable[] = [];
-	private readonly onNavigate?: (node: CircuitNode) => Promise<void>;
+	private readonly onNavigate?: (node: CircuitNode, graph: CircuitGraph) => Promise<void>;
 	private readonly onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>;
 	private readonly onRequestGraph?: (
 		scope: 'current-file' | 'full-architecture' | 'codeflow',
@@ -19,7 +19,7 @@ export class CircuitPanel {
 	static createOrShow(
 		extensionUri: vscode.Uri,
 		graph: CircuitGraph,
-		onNavigate?: (node: CircuitNode) => Promise<void>,
+		onNavigate?: (node: CircuitNode, graph: CircuitGraph) => Promise<void>,
 		onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>,
 		onRequestGraph?: (
 			scope: 'current-file' | 'full-architecture' | 'codeflow',
@@ -49,7 +49,7 @@ export class CircuitPanel {
 		panel: vscode.WebviewPanel,
 		extensionUri: vscode.Uri,
 		graph: CircuitGraph,
-		onNavigate?: (node: CircuitNode) => Promise<void>,
+		onNavigate?: (node: CircuitNode, graph: CircuitGraph) => Promise<void>,
 		onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>,
 		onRequestGraph?: (
 			scope: 'current-file' | 'full-architecture' | 'codeflow',
@@ -68,7 +68,10 @@ export class CircuitPanel {
 		this.panel.webview.onDidReceiveMessage(
 			async (msg) => {
 				if (msg?.type === 'navigate' && msg?.node && this.onNavigate) {
-					await this.onNavigate(msg.node as CircuitNode);
+					if (msg?.graph) {
+						this.graph = msg.graph as CircuitGraph;
+					}
+					await this.onNavigate(msg.node as CircuitNode, this.graph);
 					return;
 				}
 				if (msg?.type === 'openSkeleton' && typeof msg?.nodeId === 'string') {
@@ -89,8 +92,12 @@ export class CircuitPanel {
 				if (msg?.type === 'viewNode' && typeof msg?.nodeId === 'string' && this.onNavigate) {
 					const node = this.graph.nodes.find((item) => item.id === msg.nodeId);
 					if (node) {
-						await this.onNavigate(node);
+						await this.onNavigate(node, this.graph);
 					}
+					return;
+				}
+				if (msg?.type === 'updateGraph' && msg?.graph) {
+					this.setGraph(msg.graph as CircuitGraph);
 				}
 			},
 			null,
@@ -266,41 +273,110 @@ export class CircuitPanel {
     }
     .card {
       pointer-events: none;
-      background: rgba(15, 23, 42, 0.75);
-      border: 1px solid rgba(33, 48, 77, 0.9);
-      border-radius: 10px;
-      padding: 10px 12px;
+      background: linear-gradient(180deg, rgba(14, 25, 52, 0.86), rgba(11, 18, 37, 0.9));
+      border: 1px solid rgba(44, 72, 118, 0.86);
+      border-radius: 12px;
+      padding: 12px 14px;
       backdrop-filter: blur(10px);
-      max-width: 420px;
+      max-width: 560px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     }
-    .title { font-weight: 700; margin-bottom: 6px; }
+    .hud-main-card {
+      width: clamp(360px, 38vw, 560px);
+    }
+    .title { font-weight: 700; margin-bottom: 8px; letter-spacing: 0.01em; }
     .muted { color: #9fb0cc; font-size: 12px; }
     .mode-row { display: flex; gap: 8px; margin-top: 8px; pointer-events: auto; }
+    .hud-sections {
+      margin-top: 12px;
+      display: grid;
+      gap: 10px;
+      pointer-events: auto;
+    }
+    .hud-section {
+      border: 1px solid rgba(40, 66, 106, 0.9);
+      background: rgba(7, 16, 36, 0.78);
+      border-radius: 11px;
+      overflow: hidden;
+    }
+    .hud-section-title {
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #9fb0cc;
+      padding: 7px 10px;
+      border-bottom: 1px solid rgba(40, 66, 106, 0.88);
+      background: rgba(12, 22, 44, 0.72);
+    }
+    .hud-option-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0;
+    }
+    .hud-option-grid.two-col {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
     .mode-btn {
-      border: 1px solid rgba(33, 48, 77, 0.95);
-      background: rgba(11, 18, 37, 0.8);
-      color: #cbd5e1;
-      border-radius: 999px;
+      border: none;
+      border-right: 1px solid rgba(40, 66, 106, 0.9);
+      border-bottom: 1px solid rgba(40, 66, 106, 0.9);
+      background: rgba(12, 22, 44, 0.66);
+      color: #d4deed;
+      border-radius: 0;
       font-size: 12px;
       font-weight: 600;
-      padding: 5px 10px;
+      padding: 9px 10px;
       cursor: pointer;
+      min-height: 34px;
+      text-align: center;
+      white-space: normal;
+      line-height: 1.2;
+      word-break: keep-all;
+      transition: background 120ms ease, color 120ms ease;
     }
+    .mode-btn:hover,
+    .mini-btn:hover {
+      background: rgba(34, 60, 101, 0.9);
+      color: #f1f5f9;
+    }
+    .hud-option-grid .mode-btn:nth-child(3n) { border-right: none; }
+    .hud-option-grid.two-col .mode-btn:nth-child(2n) { border-right: none; }
+    .hud-option-grid .mode-btn:nth-last-child(-n + 3) { border-bottom: none; }
+    .hud-option-grid.two-col .mode-btn:nth-last-child(-n + 2) { border-bottom: none; }
     .mode-btn.active {
-      border-color: rgba(34, 197, 94, 0.9);
-      background: rgba(22, 163, 74, 0.3);
+      background: linear-gradient(180deg, rgba(22, 163, 74, 0.38), rgba(22, 163, 74, 0.18));
       color: #dcfce7;
+      box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.75);
     }
     .mini-btn {
-      border: 1px solid rgba(33, 48, 77, 0.9);
-      background: rgba(11, 18, 37, 0.72);
-      color: #cbd5e1;
-      border-radius: 8px;
-      font-size: 11px;
+      border: none;
+      border-right: 1px solid rgba(40, 66, 106, 0.9);
+      border-bottom: 1px solid rgba(40, 66, 106, 0.9);
+      background: rgba(12, 22, 44, 0.66);
+      color: #d4deed;
+      border-radius: 0;
+      font-size: 12px;
       font-weight: 600;
-      padding: 4px 8px;
+      padding: 9px 10px;
       cursor: pointer;
       pointer-events: auto;
+      min-height: 34px;
+      text-align: center;
+      white-space: normal;
+      line-height: 1.2;
+      word-break: keep-all;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .scope-section .hud-option-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    #codeFlowBtn {
+      grid-column: 1 / -1;
+    }
+    .mini-btn.active {
+      background: linear-gradient(180deg, rgba(22, 163, 74, 0.38), rgba(22, 163, 74, 0.18));
+      color: #dcfce7;
+      box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.75);
     }
     .mini-btn:disabled {
       opacity: 0.45;
@@ -313,7 +389,19 @@ export class CircuitPanel {
     #includeExternalBtn {
       display: none;
     }
-    #modeHint { margin-top: 6px; color: #9fb0cc; font-size: 11px; }
+    #disconnectContextBtn {
+      display: none;
+    }
+    #modeHint {
+      margin-top: 10px;
+      color: #9fb0cc;
+      font-size: 11px;
+      border: 1px solid rgba(40, 66, 106, 0.72);
+      background: rgba(12, 22, 44, 0.45);
+      border-radius: 9px;
+      padding: 8px 10px;
+      line-height: 1.45;
+    }
     #details { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; color: #cbd5e1; }
     #canvas { display: block; width: 100%; height: 100%; }
     #portTip {
@@ -364,11 +452,67 @@ export class CircuitPanel {
       background: rgba(34, 197, 94, 0.15);
       border-color: rgba(34, 197, 94, 0.35);
     }
+    #fabWrap {
+      position: absolute;
+      right: 16px;
+      bottom: 16px;
+      z-index: 60;
+      pointer-events: auto;
+    }
+    #fabAdd {
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      border: 1px solid rgba(51, 65, 85, 0.95);
+      background: rgba(15, 23, 42, 0.9);
+      color: #e2e8f0;
+      font-size: 20px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+    }
+    #fabMenu {
+      margin-top: 6px;
+      border-radius: 10px;
+      border: 1px solid rgba(33, 48, 77, 0.95);
+      background: rgba(15, 23, 42, 0.92);
+      backdrop-filter: blur(8px);
+      min-width: 140px;
+      padding: 6px;
+      transform-origin: bottom right;
+      transform: scale(0.92);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 180ms ease, opacity 180ms ease;
+    }
+    #fabMenu.show {
+      transform: scale(1);
+      opacity: 1;
+      pointer-events: auto;
+    }
+    #fabMenu button {
+      width: 100%;
+      text-align: left;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: #e2e8f0;
+      font-size: 12px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    #fabMenu button:hover {
+      background: rgba(34, 197, 94, 0.15);
+      border-color: rgba(34, 197, 94, 0.35);
+    }
   </style>
 </head>
 <body>
   <div id="hud">
     <div id="hudControls">
+      <button id="viewLockBtn" class="hud-control-btn" title="Lock view" aria-label="Lock view">
+        <span class="hud-control-btn-icon">🔓</span>
+      </button>
       <button id="hudMinBtn" class="hud-control-btn" title="Minimize HUD" aria-label="Minimize HUD">
         <span class="hud-control-btn-icon">−</span>
       </button>
@@ -378,22 +522,36 @@ export class CircuitPanel {
     </div>
     <div class="card hud-main-card">
       <div class="title">Circuit Mode</div>
-      <div class="muted">Double-click to toggle Hand mode (pan). Drag nodes to rearrange. Scroll to zoom. In Architecture view, click a layer node to collapse/expand it.</div>
-      <div class="mode-row">
-        <button id="modeArchitecture" class="mode-btn active">Architecture</button>
-        <button id="modeRuntime" class="mode-btn">Runtime</button>
-      </div>
-      <div class="mode-row">
-        <button id="collapseAllBtn" class="mini-btn">Collapse All</button>
-        <button id="expandAllBtn" class="mini-btn">Expand All</button>
-      </div>
-      <div class="mode-row">
-        <button id="fullArchitectureBtn" class="mini-btn">Full Architecture</button>
-        <button id="currentFileBtn" class="mini-btn">Current File</button>
-        <button id="codeFlowBtn" class="mini-btn">CodeFlow</button>
-      </div>
-      <div class="mode-row">
-        <button id="edgeFilterBtn" class="mini-btn">Edges: All</button>
+      <div class="muted">Double-click to toggle Hand mode (pan). Drag nodes to rearrange. Scroll to zoom. In Runtime CodeFlow, click an output port then click Context Bot to wire context (repeat same action to detach).</div>
+      <div class="hud-sections">
+        <div class="hud-section">
+          <div class="hud-section-title">View Mode</div>
+          <div class="hud-option-grid two-col">
+            <button id="modeArchitecture" class="mode-btn active">Architecture</button>
+            <button id="modeRuntime" class="mode-btn">Runtime</button>
+          </div>
+        </div>
+        <div class="hud-section">
+          <div class="hud-section-title">Layout</div>
+          <div class="hud-option-grid two-col">
+            <button id="collapseAllBtn" class="mini-btn">Collapse All</button>
+            <button id="expandAllBtn" class="mini-btn">Expand All</button>
+          </div>
+        </div>
+        <div class="hud-section scope-section">
+          <div class="hud-section-title">Scope</div>
+          <div class="hud-option-grid">
+            <button id="fullArchitectureBtn" class="mini-btn">Full Architecture</button>
+            <button id="currentFileBtn" class="mini-btn">Current File</button>
+            <button id="codeFlowBtn" class="mini-btn">CodeFlow</button>
+          </div>
+        </div>
+        <div class="hud-section">
+          <div class="hud-section-title">Edges</div>
+          <div class="hud-option-grid">
+            <button id="edgeFilterBtn" class="mini-btn">Edges: All</button>
+          </div>
+        </div>
       </div>
       <div id="modeHint">Architecture view: grouped by layers.</div>
     </div>
@@ -402,11 +560,18 @@ export class CircuitPanel {
       <div id="details" class="muted">None</div>
       <div id="selectionActions" class="mode-row">
         <button id="includeExternalBtn" class="mini-btn">Include external neighbors</button>
+        <button id="disconnectContextBtn" class="mini-btn">Disconnect connection</button>
       </div>
     </div>
   </div>
   <div id="portTip"></div>
   <div id="nodeMenu"></div>
+  <div id="fabWrap">
+    <button id="fabAdd" title="Add node" aria-label="Add node">+</button>
+    <div id="fabMenu">
+      <button id="addContextBotBtn">Context Bot</button>
+    </div>
+  </div>
   <canvas id="canvas"></canvas>
   <script nonce="${nonce}" type="module">
     let THREE;
@@ -425,6 +590,10 @@ export class CircuitPanel {
     const details = document.getElementById('details');
     const portTip = document.getElementById('portTip');
     const nodeMenu = document.getElementById('nodeMenu');
+    const fabWrap = document.getElementById('fabWrap');
+    const fabAdd = document.getElementById('fabAdd');
+    const fabMenu = document.getElementById('fabMenu');
+    const addContextBotBtn = document.getElementById('addContextBotBtn');
     const modeArchitectureBtn = document.getElementById('modeArchitecture');
     const modeRuntimeBtn = document.getElementById('modeRuntime');
     const collapseAllBtn = document.getElementById('collapseAllBtn');
@@ -434,7 +603,9 @@ export class CircuitPanel {
     const codeFlowBtn = document.getElementById('codeFlowBtn');
     const edgeFilterBtn = document.getElementById('edgeFilterBtn');
     const includeExternalBtn = document.getElementById('includeExternalBtn');
+    const disconnectContextBtn = document.getElementById('disconnectContextBtn');
     const modeHint = document.getElementById('modeHint');
+    const viewLockBtn = document.getElementById('viewLockBtn');
     const hudMinBtn = document.getElementById('hudMinBtn');
     const hudMaxBtn = document.getElementById('hudMaxBtn');
 
@@ -448,6 +619,7 @@ export class CircuitPanel {
     let menuNodeId = null;
     let hudMinimized = false;
     let hudMaximized = false;
+    let viewLocked = false;
 
     try {
       const saved = vscode?.getState?.();
@@ -467,6 +639,7 @@ export class CircuitPanel {
       }
       hudMinimized = !!saved?.hudMinimized;
       hudMaximized = !!saved?.hudMaximized;
+      viewLocked = !!saved?.viewLocked;
     } catch {}
 
     // Node-RED style 2D node graph (boxes + ports) on the Z=0 plane.
@@ -550,6 +723,16 @@ export class CircuitPanel {
     const nodeAnimations = []; // { group, target, targetScale, delay }
     const manualNodePositions = new Map(); // nodeId -> THREE.Vector3
     const cameraAnim = { x: 0, y: 0, zoom: 1, active: false };
+    const connectPreview = {
+      active: false,
+      fromNodeId: null,
+      fromPortId: null,
+      fromPoint: new THREE.Vector3(),
+      toPoint: new THREE.Vector3(),
+      snapped: false,
+      snapPortId: null,
+      line: null
+    };
     let lastFrameAt = 0;
 
     function clearSceneGroups() {
@@ -563,6 +746,7 @@ export class CircuitPanel {
       adjacency.clear();
       edges.length = 0;
       nodeAnimations.length = 0;
+      connectPreview.line = null;
     }
 
     function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
@@ -711,7 +895,8 @@ export class CircuitPanel {
       for (let i = 0; i < g.nodes.length; i++) {
         const node = g.nodes[i];
         const includeInArchitecture = node.type !== 'sink';
-        const includeInRuntime = node.type === 'function' || node.type === 'sink' || node.type === 'module';
+        const includeInRuntime =
+          node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility';
         const layerCollapsed = viewMode === 'architecture' && node.type !== 'layer' && node.layer && collapsedLayers.has(node.layer);
         const inSkeleton = !activeSkeleton || activeSkeleton.has(node.id);
         const shouldInclude =
@@ -771,6 +956,257 @@ export class CircuitPanel {
         return la - lb;
       });
       return withTarget[0].node.id;
+    }
+
+    function makeEdgeId(prefix = 'e') {
+      return prefix + ':' + Date.now().toString(36) + ':' + Math.random().toString(36).slice(2, 8);
+    }
+
+    function hasContextBot() {
+      return graph.nodes.some((node) => node.id === contextBotId);
+    }
+
+    function getContextBotNode() {
+      return graph.nodes.find((node) => node.id === contextBotId) || null;
+    }
+
+    function nodeFeedsContextBot(nodeId) {
+      return graph.edges.some((edge) => edge.from === nodeId && edge.to === contextBotId && String(edge.label || '').includes('[context-bot]'));
+    }
+
+    function showFabMenu() {
+      if (!fabMenu) {
+        return;
+      }
+      fabMenu.classList.add('show');
+    }
+
+    function hideFabMenu() {
+      if (!fabMenu) {
+        return;
+      }
+      fabMenu.classList.remove('show');
+    }
+
+    function toggleFabMenu() {
+      if (!fabMenu) {
+        return;
+      }
+      if (fabMenu.classList.contains('show')) {
+        hideFabMenu();
+      } else {
+        showFabMenu();
+      }
+    }
+
+    function updateFabVisibility() {
+      if (!fabWrap) {
+        return;
+      }
+      const show = viewMode === 'runtime' && isCodeFlowGraph(graph);
+      fabWrap.style.display = show ? 'block' : 'none';
+      if (!show) {
+        hideFabMenu();
+      }
+    }
+
+    function ensureContextBotNode() {
+      if (hasContextBot()) {
+        return getContextBotNode();
+      }
+      const baseX = 540;
+      const baseY = 0;
+      const newNode = {
+        id: contextBotId,
+        type: 'utility',
+        layer: 'utility',
+        groupId: 'group:context',
+        label: 'Context Bot',
+        detail: 'context-bot | aggregates snippets from connected nodes',
+        inputs: [{ id: 'in:context:multi', name: 'context in', direction: 'in', kind: 'call', detail: 'multiple node contexts' }],
+        outputs: [{ id: 'out:context:answer', name: 'answer', direction: 'out', kind: 'return', detail: 'chat response' }]
+      };
+      graph.nodes.push(newNode);
+      manualNodePositions.set(contextBotId, new THREE.Vector3(baseX, baseY, 0));
+      buildGraphScene(graph);
+      const meta = nodeMeta.get(contextBotId);
+      if (meta) {
+        meta.group.scale.setScalar(0.15);
+        nodeAnimations.push({
+          nodeId: contextBotId,
+          group: meta.group,
+          target: meta.group.position.clone(),
+          targetScale: 1,
+          delay: 0.02
+        });
+      }
+      vscode?.postMessage({ type: 'updateGraph', graph });
+      return newNode;
+    }
+
+    function removeContextBotNode() {
+      if (!hasContextBot()) {
+        return;
+      }
+      graph.nodes = graph.nodes.filter((node) => node.id !== contextBotId);
+      graph.edges = graph.edges.filter((edge) => edge.from !== contextBotId && edge.to !== contextBotId);
+      buildGraphScene(graph);
+      setDetails(null);
+      vscode?.postMessage({ type: 'updateGraph', graph });
+      hideFabMenu();
+    }
+
+    function connectNodeToContextBot(nodeId) {
+      if (nodeId === contextBotId) {
+        return;
+      }
+      ensureContextBotNode();
+      const exists = graph.edges.some((edge) => edge.from === nodeId && edge.to === contextBotId && String(edge.label || '').includes('[context-bot]'));
+      if (exists) {
+        const selected = nodeMeta.get(nodeId)?.node;
+        if (selected) {
+          selectedNodeId = nodeId;
+          setDetails(selected);
+        }
+        return;
+      }
+      graph.edges.push({
+        id: makeEdgeId('context'),
+        kind: 'runtime',
+        from: nodeId,
+        to: contextBotId,
+        label: 'context input [context-bot]'
+      });
+      buildGraphScene(graph);
+      const selected = nodeMeta.get(nodeId)?.node;
+      if (selected) {
+        selectedNodeId = nodeId;
+        setDetails(selected);
+      }
+      vscode?.postMessage({ type: 'updateGraph', graph });
+    }
+
+    function beginContextConnectFromPort(portHit) {
+      if (!portHit || !portHit.userData) {
+        return;
+      }
+      const nodeId = String(portHit.userData.nodeId || '');
+      const portId = String(portHit.userData.portId || '');
+      const dir = String(portHit.userData.direction || '');
+      if (!nodeId || !portId || dir !== 'out' || nodeId === contextBotId) {
+        return;
+      }
+      ensureContextBotNode();
+      const world = portHit.position.clone();
+      world.add(nodeMeta.get(nodeId)?.group?.position || new THREE.Vector3());
+      world.z = 0;
+
+      if (!connectPreview.line) {
+        const geom = new THREE.BufferGeometry().setFromPoints([world.clone(), world.clone()]);
+        const mat = new THREE.LineDashedMaterial({
+          color: 0x22c55e,
+          linewidth: 1,
+          dashSize: 10,
+          gapSize: 6,
+          transparent: true,
+          opacity: 0.9
+        });
+        const line = new THREE.Line(geom, mat);
+        line.computeLineDistances();
+        particleGroup.add(line);
+        connectPreview.line = line;
+      }
+
+      connectPreview.active = true;
+      connectPreview.fromNodeId = nodeId;
+      connectPreview.fromPortId = portId;
+      connectPreview.fromPoint.copy(world);
+      connectPreview.toPoint.copy(world);
+      if (connectPreview.line) {
+        connectPreview.line.visible = true;
+      }
+      selectedNodeId = nodeId;
+      const selectedNode = nodeMeta.get(nodeId)?.node;
+      if (selectedNode) {
+        setDetails(selectedNode);
+      }
+      hideNodeMenu();
+    }
+
+    function cancelContextConnect() {
+      connectPreview.active = false;
+      connectPreview.fromNodeId = null;
+      connectPreview.fromPortId = null;
+      connectPreview.snapped = false;
+      connectPreview.snapPortId = null;
+      if (connectPreview.line) {
+        connectPreview.line.visible = false;
+      }
+    }
+
+    function completeContextConnect() {
+      if (!connectPreview.active || !connectPreview.fromNodeId) {
+        return;
+      }
+      ensureContextBotNode();
+      const sourceNodeId = connectPreview.fromNodeId;
+      const sourcePortId = connectPreview.fromPortId;
+      const targetPortId = connectPreview.snapPortId || 'in:context:multi';
+      const exists = graph.edges.some((edge) =>
+        edge.from === sourceNodeId &&
+        edge.to === contextBotId &&
+        edge.fromPort === sourcePortId &&
+        edge.toPort === targetPortId &&
+        String(edge.label || '').includes('[context-bot]')
+      );
+      if (exists) {
+        graph.edges = graph.edges.filter((edge) => !(
+          edge.from === sourceNodeId &&
+          edge.to === contextBotId &&
+          edge.fromPort === sourcePortId &&
+          edge.toPort === targetPortId &&
+          String(edge.label || '').includes('[context-bot]')
+        ));
+      } else {
+        graph.edges.push({
+          id: makeEdgeId('context'),
+          kind: 'runtime',
+          from: sourceNodeId,
+          to: contextBotId,
+          fromPort: sourcePortId || undefined,
+          toPort: targetPortId,
+          label: 'context input [context-bot]'
+        });
+      }
+      buildGraphScene(graph);
+      const selected = nodeMeta.get(sourceNodeId)?.node;
+      if (selected) {
+        selectedNodeId = sourceNodeId;
+        setDetails(selected);
+      } else {
+        setDetails(null);
+      }
+      vscode?.postMessage({ type: 'updateGraph', graph });
+      cancelContextConnect();
+    }
+
+    function disconnectNodeFromContextBot(nodeId) {
+      if (!hasContextBot()) {
+        return;
+      }
+      const before = graph.edges.length;
+      graph.edges = graph.edges.filter((edge) => !(edge.from === nodeId && edge.to === contextBotId));
+      if (graph.edges.length !== before) {
+        buildGraphScene(graph);
+        const selected = nodeMeta.get(nodeId)?.node;
+        if (selected) {
+          selectedNodeId = nodeId;
+          setDetails(selected);
+        } else {
+          setDetails(null);
+        }
+        vscode?.postMessage({ type: 'updateGraph', graph });
+      }
     }
 
     function layoutNodes(nodes) {
@@ -923,14 +1359,16 @@ export class CircuitPanel {
         const labelText = fitLabel(node.label, 22);
         const w = node.type === 'layer' ? NODE_W - 42 : NODE_W;
         const h = node.type === 'layer' ? NODE_H - 16 : NODE_H;
+        const autoTargetPosition = positions.get(node.id);
+        const pinnedPosition = manualNodePositions.get(node.id);
+        const targetPosition = pinnedPosition || autoTargetPosition;
 
         const group = new THREE.Group();
-        const targetPosition = positions.get(node.id);
         const previous = previousNodeState.get(node.id);
         if (previous) {
           group.position.copy(previous.position);
-        } else if (manualNodePositions.has(node.id)) {
-          group.position.copy(manualNodePositions.get(node.id));
+        } else if (pinnedPosition) {
+          group.position.copy(pinnedPosition);
         } else if (isArchitectureMode && node.type === 'function' && node.layer) {
           const layerAnchor = positions.get('layer:' + node.layer);
           if (layerAnchor) {
@@ -1118,7 +1556,9 @@ export class CircuitPanel {
         adjacency.set(edge.to, a2);
       }
 
-      fitViewToGraph(positions);
+      if (!viewLocked) {
+        fitViewToGraph(positions);
+      }
     }
 
     function getOutAnchor(nodeId, portId) {
@@ -1210,6 +1650,15 @@ export class CircuitPanel {
         hiddenCount > 0
           ? 'Include external neighbors (' + hiddenCount + ')'
           : 'Include external neighbors';
+
+      if (disconnectContextBtn) {
+        const canDisconnect =
+          !!node &&
+          node.id !== contextBotId &&
+          nodeFeedsContextBot(node.id);
+        disconnectContextBtn.style.display = canDisconnect ? 'inline-flex' : 'none';
+        disconnectContextBtn.disabled = !canDisconnect;
+      }
     }
 
     function setDetails(node) {
@@ -1352,6 +1801,7 @@ export class CircuitPanel {
 
     let hoveredNodeId = null;
     let selectedNodeId = null;
+    const contextBotId = 'context:bot';
     let dragging = null; // { nodeId, startX, startY, moved }
     if (skeletonRootNodeId) {
       selectedNodeId = skeletonRootNodeId;
@@ -1385,7 +1835,8 @@ export class CircuitPanel {
           collapsedLayers: Array.from(collapsedLayers),
           edgeFilterMode: edgeFilterMode,
           hudMinimized: hudMinimized,
-          hudMaximized: hudMaximized
+          hudMaximized: hudMaximized,
+          viewLocked: viewLocked
         });
       } catch {}
     }
@@ -1412,6 +1863,15 @@ export class CircuitPanel {
         }
         hudMaxBtn.disabled = hudMinimized;
       }
+      if (viewLockBtn) {
+        viewLockBtn.classList.toggle('active', viewLocked);
+        viewLockBtn.title = viewLocked ? 'Unlock view' : 'Lock view';
+        viewLockBtn.setAttribute('aria-label', viewLocked ? 'Unlock view' : 'Lock view');
+        const lockIcon = viewLockBtn.querySelector('.hud-control-btn-icon');
+        if (lockIcon) {
+          lockIcon.textContent = viewLocked ? '🔒' : '🔓';
+        }
+      }
       persistUiState();
     }
 
@@ -1431,6 +1891,11 @@ export class CircuitPanel {
       applyHudState();
     }
 
+    function toggleViewLock() {
+      viewLocked = !viewLocked;
+      applyHudState();
+    }
+
     function updateModeUi() {
       if (modeArchitectureBtn) {
         modeArchitectureBtn.classList.toggle('active', viewMode === 'architecture');
@@ -1445,7 +1910,7 @@ export class CircuitPanel {
         modeHint.textContent =
           viewMode === 'architecture'
             ? ('Architecture view: grouped by layers. Click a layer to collapse. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'))
-            : ('Runtime view: function call/data-flow with ports and animated movement. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
+            : ('Runtime view: function call/data-flow with ports and animated movement. Click output port, then Context Bot to connect context (repeat to detach). Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
       }
       if (collapseAllBtn) {
         collapseAllBtn.disabled = viewMode !== 'architecture';
@@ -1453,6 +1918,7 @@ export class CircuitPanel {
       if (expandAllBtn) {
         expandAllBtn.disabled = viewMode !== 'architecture';
       }
+      updateFabVisibility();
       persistUiState();
     }
 
@@ -1604,6 +2070,38 @@ export class CircuitPanel {
         controls.target.y = panning.targetY + dy * worldPerPxY;
         return;
       }
+
+      if (connectPreview.active) {
+        raycaster.setFromCamera(pointer, camera);
+        if (raycaster.ray.intersectPlane(dragPlane, dragPoint)) {
+          connectPreview.toPoint.copy(dragPoint);
+        }
+
+        connectPreview.snapped = false;
+        connectPreview.snapPortId = null;
+        const botMeta = nodeMeta.get(contextBotId);
+        if (botMeta && botMeta.ports?.in?.length) {
+          const SNAP_RADIUS = 42;
+          let nearestPort = null;
+          let nearestDist = Number.POSITIVE_INFINITY;
+          for (let i = 0; i < botMeta.ports.in.length; i++) {
+            const p = botMeta.ports.in[i];
+            const world = p.mesh.position.clone().add(botMeta.group.position);
+            world.z = 0;
+            const dist = world.distanceTo(dragPoint);
+            if (dist < nearestDist) {
+              nearestDist = dist;
+              nearestPort = p;
+            }
+          }
+          if (nearestPort && nearestDist <= SNAP_RADIUS) {
+            connectPreview.snapped = true;
+            connectPreview.snapPortId = nearestPort.port?.id || null;
+            connectPreview.toPoint.copy(nearestPort.mesh.position.clone().add(botMeta.group.position));
+            connectPreview.toPoint.z = 0;
+          }
+        }
+      }
     }
 
     function onPointerDown(ev) {
@@ -1615,6 +2113,16 @@ export class CircuitPanel {
       const portHits = raycaster.intersectObjects(portMeshes, false);
       const phit = portHits[0] && portHits[0].object ? portHits[0].object : null;
       if (phit && phit.userData && phit.userData.kind === 'port') {
+        const nodeId = String(phit.userData.nodeId || '');
+        const direction = String(phit.userData.direction || '');
+        if (connectPreview.active && nodeId === contextBotId && direction === 'in') {
+          completeContextConnect();
+          return;
+        }
+        if (direction === 'out' && nodeId !== contextBotId) {
+          beginContextConnectFromPort(phit);
+          return;
+        }
         const name = phit.userData.portName || '';
         const dir = phit.userData.direction || '';
         const kind = phit.userData.portKind || '';
@@ -1629,7 +2137,22 @@ export class CircuitPanel {
       const hit = hits[0] && hits[0].object ? hits[0].object : null;
       if (hit && hit.userData && hit.userData.nodeId) {
         const nodeId = hit.userData.nodeId;
+        if (connectPreview.active && nodeId === contextBotId) {
+          completeContextConnect();
+          return;
+        }
+        if (connectPreview.active && nodeId !== contextBotId) {
+          cancelContextConnect();
+        }
         if (ev.button === 2) {
+          selectedNodeId = nodeId;
+          const node = nodeMeta.get(nodeId)?.node;
+          if (node) {
+            setDetails(node);
+            if (vscode && (node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility')) {
+              vscode.postMessage({ type: 'navigate', node: node, graph });
+            }
+          }
           showNodeMenu(ev.clientX, ev.clientY, nodeId);
           return;
         }
@@ -1657,10 +2180,19 @@ export class CircuitPanel {
         };
         canvas.setPointerCapture?.(ev.pointerId);
         setCursor();
+        return;
+      }
+
+      if (connectPreview.active && ev.button === 0) {
+        cancelContextConnect();
       }
     }
 
     function onPointerUp() {
+      if (connectPreview.active && connectPreview.snapped) {
+        completeContextConnect();
+        return;
+      }
       controls.enabled = true;
       if (dragging) {
         const nodeId = dragging.nodeId;
@@ -1728,7 +2260,16 @@ export class CircuitPanel {
       const hits = raycaster.intersectObjects(nodeBodies, false);
       const hit = hits[0] && hits[0].object ? hits[0].object : null;
       if (hit && hit.userData && hit.userData.nodeId) {
-        showNodeMenu(ev.clientX, ev.clientY, hit.userData.nodeId);
+        const nodeId = hit.userData.nodeId;
+        selectedNodeId = nodeId;
+        const node = nodeMeta.get(nodeId)?.node;
+        if (node) {
+          setDetails(node);
+          if (vscode && (node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility')) {
+            vscode.postMessage({ type: 'navigate', node: node, graph });
+          }
+        }
+        showNodeMenu(ev.clientX, ev.clientY, nodeId);
       } else {
         hideNodeMenu();
       }
@@ -1743,8 +2284,41 @@ export class CircuitPanel {
     codeFlowBtn?.addEventListener('click', () => requestGraphScope('codeflow'));
     edgeFilterBtn?.addEventListener('click', toggleEdgeFilterMode);
     includeExternalBtn?.addEventListener('click', includeExternalNeighborsForSelected);
+    disconnectContextBtn?.addEventListener('click', () => {
+      if (!selectedNodeId || selectedNodeId === contextBotId) {
+        return;
+      }
+      disconnectNodeFromContextBot(selectedNodeId);
+    });
+    viewLockBtn?.addEventListener('click', toggleViewLock);
     hudMinBtn?.addEventListener('click', toggleHudMinimized);
     hudMaxBtn?.addEventListener('click', toggleHudMaximized);
+    fabAdd?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      toggleFabMenu();
+    });
+    addContextBotBtn?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      ensureContextBotNode();
+      hideFabMenu();
+      selectedNodeId = contextBotId;
+      const botNode = nodeMeta.get(contextBotId)?.node;
+      if (botNode) {
+        setDetails(botNode);
+      }
+    });
+    window.addEventListener('pointerdown', (ev) => {
+      const target = ev.target;
+      if (nodeMenu && nodeMenu.style.display === 'block' && target instanceof Node && !nodeMenu.contains(target)) {
+        hideNodeMenu();
+      }
+      if (fabMenu && fabMenu.classList.contains('show') && target instanceof Node) {
+        const insideFab = (fabMenu.contains(target) || (fabAdd && fabAdd.contains(target)));
+        if (!insideFab) {
+          hideFabMenu();
+        }
+      }
+    });
     canvas.addEventListener('dblclick', (ev) => {
       // If double-clicking a node, open node menu (Skeleton / Unskeleton).
       updatePointer(ev);
@@ -1762,6 +2336,7 @@ export class CircuitPanel {
       const msg = event.data;
       if (msg && msg.type === 'graph') {
         graph = msg.graph;
+        updateFabVisibility();
         buildGraphScene(graph);
       }
     });
@@ -1910,6 +2485,26 @@ export class CircuitPanel {
       });
       nodeMenu.appendChild(viewCodeBtn);
 
+      if (node.id !== contextBotId && nodeFeedsContextBot(node.id)) {
+        const disconnectBtn = document.createElement('button');
+        disconnectBtn.textContent = 'Disconnect Context Bot';
+        disconnectBtn.addEventListener('click', () => {
+          disconnectNodeFromContextBot(node.id);
+          hideNodeMenu();
+        });
+        nodeMenu.appendChild(disconnectBtn);
+      }
+
+      if (node.id === contextBotId) {
+        const removeBotBtn = document.createElement('button');
+        removeBotBtn.textContent = 'Remove Context Bot';
+        removeBotBtn.addEventListener('click', () => {
+          removeContextBotNode();
+          hideNodeMenu();
+        });
+        nodeMenu.appendChild(removeBotBtn);
+      }
+
       nodeMenu.style.left = Math.max(8, x + 8) + 'px';
       nodeMenu.style.top = Math.max(8, y + 8) + 'px';
       nodeMenu.style.display = 'block';
@@ -2026,6 +2621,19 @@ export class CircuitPanel {
           e.t = (e.t + 0.004) % 1;
         }
         updateEdgeVisual(e);
+      }
+
+      if (connectPreview.line) {
+        if (connectPreview.active) {
+          connectPreview.line.visible = true;
+          connectPreview.line.geometry.setFromPoints([
+            connectPreview.fromPoint.clone(),
+            connectPreview.toPoint.clone()
+          ]);
+          connectPreview.line.computeLineDistances();
+        } else {
+          connectPreview.line.visible = false;
+        }
       }
 
       renderer.render(scene, camera);

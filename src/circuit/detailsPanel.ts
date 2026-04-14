@@ -81,11 +81,39 @@ export class CircuitDetailsPanel {
 	private async setNode(node: CircuitNode): Promise<void> {
 		const nodeChanged = this.currentNode?.id !== node.id;
 		this.currentNode = node;
-		this.currentSnippet = await getSnippet(node);
+		if (node.id === 'context:bot') {
+			this.currentSnippet = await this.getContextBotSnippet(node);
+		} else {
+			this.currentSnippet = await getSnippet(node);
+		}
 		if (nodeChanged) {
 			this.chatTurns = [];
 		}
 		this.render();
+	}
+
+	private async getContextBotSnippet(node: CircuitNode): Promise<string> {
+		const graph = this.currentGraph;
+		if (!graph) {
+			return '(no graph context available)';
+		}
+		const incoming = graph.edges.filter((edge) => edge.to === node.id);
+		if (!incoming.length) {
+			return '(no connected context nodes yet)';
+		}
+		const nodeById = new Map(graph.nodes.map((n) => [n.id, n] as const));
+		const chunks: string[] = [];
+		for (const edge of incoming) {
+			const source = nodeById.get(edge.from);
+			if (!source || source.id === node.id) {
+				continue;
+			}
+			const snippet = await getSnippet(source);
+			chunks.push(
+				`// Context Node: ${source.label} (${source.type})\n${snippet || '(no snippet available)'}`
+			);
+		}
+		return chunks.length ? chunks.join('\n\n') : '(no connected context snippets found)';
 	}
 
 	private async handleAsk(rawQuestion: string): Promise<void> {

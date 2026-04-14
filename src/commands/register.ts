@@ -159,12 +159,11 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		CircuitPanel.createOrShow(
 			deps.extensionUri,
 			graph,
-			async (node) => {
-				if (!node?.uri || typeof node.line !== 'number' || typeof node.character !== 'number') {
-					return;
+			async (node, currentGraph) => {
+				if (node?.uri && typeof node.line === 'number' && typeof node.character === 'number') {
+					await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
 				}
-				await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
-				await CircuitDetailsPanel.createOrShow(node, graph, deps.askNodeQuestion);
+				await CircuitDetailsPanel.createOrShow(node, currentGraph, deps.askNodeQuestion);
 			},
 			async (node, currentGraph) => buildGlobalSkeletonGraph(node, currentGraph, 3),
 			async (scope) => {

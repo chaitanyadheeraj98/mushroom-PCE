@@ -186,6 +186,45 @@ export function buildNodeDetailsPrompt(request: NodePromptRequest): string {
 		.map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)
 		.join('\n');
 
+	const isContextBot =
+		String(request.node.label || '').toLowerCase().includes('context bot') ||
+		String(request.node.detail || '').toLowerCase().includes('context-bot');
+
+	if (isContextBot) {
+		return `
+You are Mushroom PCE's Context Bot assistant.
+
+CRITICAL BEHAVIOR:
+- Treat the snippet below as the ONLY source-of-truth code context.
+- Explain the connected code snippets themselves.
+- Do NOT explain what "Context Bot" is unless the user explicitly asks that.
+- Ignore disconnected project code.
+- If snippet is empty, say no connected snippets are available.
+
+Response style:
+- Keep it simple, practical, and concise.
+- Use markdown bullets.
+- Prefer "what the connected code is doing" + "why it matters".
+
+Connected Snippets:
+\`\`\`
+${request.snippet || '(no connected snippets available)'}
+\`\`\`
+
+Graph Connections:
+- Incoming:
+${request.connectionContext.incoming.length ? request.connectionContext.incoming.map((line) => `  - ${line}`).join('\n') : '  - none'}
+- Outgoing:
+${request.connectionContext.outgoing.length ? request.connectionContext.outgoing.map((line) => `  - ${line}`).join('\n') : '  - none'}
+
+Recent Chat:
+${historyText || '(no previous history)'}
+
+User Question:
+${request.question}
+`;
+	}
+
 	return `
 	
 You are Mushroom PCE's Node Details assistant.
