@@ -683,13 +683,13 @@ export class CircuitPanel {
     const particleGroup = new THREE.Group();
     scene.add(edgeGroup, particleGroup, labelGroup, nodeGroup);
 
-    const NODE_W = 228;
-    const NODE_H = 64;
-    const NODE_HEADER_H = 18;
-    const NODE_ICON_W = 24;
-    const NODE_ICON_H = 24;
-    const NODE_BODY_COLOR = 0x132238;
-    const NODE_HEADER_COLOR = 0x1d3656;
+    const NODE_W = 248;
+    const NODE_H = 74;
+    const NODE_HEADER_H = 16;
+    const NODE_ICON_W = 12;
+    const NODE_ICON_H = 12;
+    const NODE_BODY_COLOR = 0x1b1f26;
+    const NODE_HEADER_COLOR = 0x2b313c;
     const NODE_ACCENT_COLOR = 0x7dd3fc;
     const layerColors = {
       system: 0xf59e0b,
@@ -710,7 +710,7 @@ export class CircuitPanel {
       utility: 0x94a3b8
     };
     const portColors = {
-      in: 0xa78bfa,   // purple
+      in: 0x8b5cf6,   // violet
       out: 0x22c55e   // green
     };
 
@@ -723,6 +723,7 @@ export class CircuitPanel {
     const nodeAnimations = []; // { group, target, targetScale, delay }
     const manualNodePositions = new Map(); // nodeId -> THREE.Vector3
     const cameraAnim = { x: 0, y: 0, zoom: 1, active: false };
+    let activePortMesh = null;
     const connectPreview = {
       active: false,
       fromNodeId: null,
@@ -747,9 +748,37 @@ export class CircuitPanel {
       edges.length = 0;
       nodeAnimations.length = 0;
       connectPreview.line = null;
+      activePortMesh = null;
     }
 
     function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+
+    function setPortGlow(mesh, enabled) {
+      if (!mesh || !mesh.material) return;
+      const mat = mesh.material;
+      const dir = String(mesh.userData?.direction || '');
+      const base = dir === 'out' ? portColors.out : portColors.in;
+      const emissiveBase = dir === 'out' ? 0x166534 : 0x4c1d95;
+      if (enabled) {
+        mat.color.setHex(base);
+        mat.emissive.setHex(base);
+        mat.emissiveIntensity = 1.15;
+      } else {
+        mat.color.setHex(base);
+        mat.emissive.setHex(emissiveBase);
+        mat.emissiveIntensity = 0.26;
+      }
+    }
+
+    function setActivePort(mesh) {
+      if (activePortMesh && activePortMesh !== mesh) {
+        setPortGlow(activePortMesh, false);
+      }
+      activePortMesh = mesh || null;
+      if (activePortMesh) {
+        setPortGlow(activePortMesh, true);
+      }
+    }
 
     function fitLabel(text, maxChars) {
       if (!text || text.length <= maxChars) return text;
@@ -853,6 +882,32 @@ export class CircuitPanel {
       const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
       const spr = new THREE.Sprite(mat);
       spr.scale.set(w * 0.55, h * 0.55, 1);
+      return spr;
+    }
+
+    function makeTinyLabelSprite(text, fgHex = '#a9b4c9') {
+      const canvasEl = document.createElement('canvas');
+      const ctx = canvasEl.getContext('2d');
+      const font = '600 10px Segoe UI, Tahoma, sans-serif';
+      ctx.font = font;
+      const metrics = ctx.measureText(text);
+      const w = clamp(Math.ceil(metrics.width + 8), 22, 120);
+      const h = 16;
+      canvasEl.width = w;
+      canvasEl.height = h;
+      ctx.font = font;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = fgHex;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, 4, h / 2);
+
+      const tex = new THREE.CanvasTexture(canvasEl);
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+      const spr = new THREE.Sprite(mat);
+      spr.scale.set(w * 0.48, h * 0.48, 1);
+      spr.userData.kind = 'tinyLabel';
       return spr;
     }
 
@@ -1050,6 +1105,7 @@ export class CircuitPanel {
       }
       graph.nodes = graph.nodes.filter((node) => node.id !== contextBotId);
       graph.edges = graph.edges.filter((edge) => edge.from !== contextBotId && edge.to !== contextBotId);
+      ctrlConnectSourceNodeId = null;
       buildGraphScene(graph);
       setDetails(null);
       vscode?.postMessage({ type: 'updateGraph', graph });
@@ -1351,7 +1407,8 @@ export class CircuitPanel {
         laneTotals.set(key, (laneTotals.get(key) || 0) + 1);
       }
 
-      const portGeom = new THREE.SphereGeometry(5.2, 14, 14);
+      const portOuterGeom = new THREE.SphereGeometry(5.6, 14, 14);
+      const portInnerGeom = new THREE.SphereGeometry(2.4, 12, 12);
       const iconGeom = new THREE.BoxGeometry(NODE_ICON_W, NODE_ICON_H, 10);
 
       for (const node of visibleGraph.nodes) {
@@ -1381,45 +1438,75 @@ export class CircuitPanel {
         }
         group.userData.kind = 'nodeGroup';
 
+        const shadow = new THREE.Mesh(
+          new THREE.BoxGeometry(w + 6, h + 6, 6),
+          new THREE.MeshStandardMaterial({
+            color: 0x02050b,
+            roughness: 0.95,
+            metalness: 0.01,
+            transparent: true,
+            opacity: 0.35
+          })
+        );
+        shadow.position.set(0, -1.4, -1.8);
+
         const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, 8), new THREE.MeshStandardMaterial({
           color: NODE_BODY_COLOR,
-          roughness: 0.62,
-          metalness: 0.08,
-          emissive: 0x08111f,
-          emissiveIntensity: 0.18
+          roughness: 0.72,
+          metalness: 0.06,
+          emissive: 0x090d13,
+          emissiveIntensity: 0.2
         }));
         body.userData.kind = 'nodeBody';
         body.userData.nodeId = node.id;
 
         const header = new THREE.Mesh(new THREE.BoxGeometry(w, NODE_HEADER_H, 9), new THREE.MeshStandardMaterial({
           color: NODE_HEADER_COLOR,
-          roughness: 0.55,
-          metalness: 0.1,
-          emissive: 0x0b1830,
-          emissiveIntensity: 0.12
+          roughness: 0.65,
+          metalness: 0.08,
+          emissive: 0x111827,
+          emissiveIntensity: 0.16
         }));
         header.position.set(0, (h / 2) - (NODE_HEADER_H / 2), 0.6);
 
-        const icon = new THREE.Mesh(iconGeom, new THREE.MeshStandardMaterial({
+        const nodeTopLine = new THREE.Mesh(new THREE.BoxGeometry(w, 3.2, 9.4), new THREE.MeshStandardMaterial({
           color: color,
-          roughness: 0.28,
+          roughness: 0.32,
           metalness: 0.18,
           emissive: color,
-          emissiveIntensity: 0.14
+          emissiveIntensity: 0.18
         }));
-        icon.position.set((-w / 2) + 18, 0, 0.8);
+        nodeTopLine.position.set(0, (h / 2) - 2.2, 0.8);
 
-        const accent = new THREE.Mesh(new THREE.BoxGeometry(6, h, 9.2), new THREE.MeshStandardMaterial({
+        const contentPanel = new THREE.Mesh(new THREE.BoxGeometry(w - 8, h - NODE_HEADER_H - 8, 7.4), new THREE.MeshStandardMaterial({
+          color: 0x0f131a,
+          roughness: 0.78,
+          metalness: 0.04,
+          emissive: 0x070a11,
+          emissiveIntensity: 0.16
+        }));
+        contentPanel.position.set(0, -4.5, 0.4);
+
+        const icon = new THREE.Mesh(iconGeom, new THREE.MeshStandardMaterial({
+          color: color,
+          roughness: 0.35,
+          metalness: 0.16,
+          emissive: color,
+          emissiveIntensity: 0.16
+        }));
+        icon.position.set((-w / 2) + 16, (h / 2) - (NODE_HEADER_H / 2), 1.0);
+
+        const accent = new THREE.Mesh(new THREE.BoxGeometry(4, h - 4, 9.2), new THREE.MeshStandardMaterial({
           color: color,
           roughness: 0.35,
           metalness: 0.12,
           emissive: color,
-          emissiveIntensity: 0.18
+          emissiveIntensity: 0.2
         }));
-        accent.position.set((-w / 2) + 3, 0, 0.7);
+        accent.position.set((-w / 2) + 2.4, 0, 0.7);
 
         const label = makeLabelSprite(labelText);
-        label.position.set((-w / 2) + 80, 0, 6.5);
+        label.position.set((-w / 2) + 88, (h / 2) - (NODE_HEADER_H / 2), 6.5);
         if (isArchitectureMode && node.type === 'layer') {
           const layerKey = getCollapseKeyForNode(node);
           if (layerKey) {
@@ -1435,11 +1522,35 @@ export class CircuitPanel {
         const inputs = !isArchitectureMode && Array.isArray(node.inputs) ? node.inputs : [];
         const outputs = !isArchitectureMode && Array.isArray(node.outputs) ? node.outputs : [];
         const ports = { in: [], out: [], byId: new Map() };
+        const rowCount = Math.max(2, Math.min(8, Math.max(inputs.length, outputs.length, 2)));
+        const rowTop = (h / 2) - NODE_HEADER_H - 8;
+        const rowBottom = (-h / 2) + 8;
+        const rowStep = rowCount > 1 ? (rowTop - rowBottom) / (rowCount - 1) : 0;
+        const rowY = (index) => rowTop - (rowStep * index);
+
+        if (!isArchitectureMode) {
+          for (let ri = 0; ri < rowCount; ri++) {
+            const y = rowY(ri);
+            if (ri > 0) {
+              const divider = new THREE.Mesh(
+                new THREE.BoxGeometry(w - 12, 0.8, 7.6),
+                new THREE.MeshStandardMaterial({
+                  color: 0x263041,
+                  roughness: 0.9,
+                  metalness: 0.02,
+                  emissive: 0x0b1220,
+                  emissiveIntensity: 0.1
+                })
+              );
+              divider.position.set(0, y + (rowStep / 2), 0.9);
+              group.add(divider);
+            }
+          }
+        }
 
         const makePort = (x, y, dir, port) => {
-          const mat = new THREE.MeshBasicMaterial({ color: dir === 'out' ? portColors.out : portColors.in });
-          const p = new THREE.Mesh(portGeom, mat);
-          p.position.set(x, y, 4.5);
+          const p = new THREE.Group();
+          p.position.set(x, y, 4.8);
           p.userData.kind = 'port';
           p.userData.nodeId = node.id;
           p.userData.portId = port.id;
@@ -1447,33 +1558,69 @@ export class CircuitPanel {
           p.userData.portName = port.name;
           p.userData.portKind = port.kind;
           p.userData.portDetail = port.detail || '';
-          portMeshes.push(p);
+
+          const outer = new THREE.Mesh(
+            portOuterGeom,
+            new THREE.MeshStandardMaterial({
+              color: dir === 'out' ? portColors.out : portColors.in,
+              roughness: 0.34,
+              metalness: 0.15,
+              emissive: dir === 'out' ? 0x166534 : 0x4c1d95,
+              emissiveIntensity: 0.26
+            })
+          );
+          const inner = new THREE.Mesh(
+            portInnerGeom,
+            new THREE.MeshStandardMaterial({
+              color: 0x0b1018,
+              roughness: 0.85,
+              metalness: 0.02,
+              emissive: 0x020617,
+              emissiveIntensity: 0.2
+            })
+          );
+          outer.userData = p.userData;
+          p.add(outer, inner);
+          portMeshes.push(outer);
           return p;
         };
 
-        // Distribute ports along left/right edge.
-        const portSpan = h - 22;
-        const portStart = (h / 2) - 11;
+        const rowIndexForPort = (index, count) => {
+          if (count <= 1) return Math.floor((rowCount - 1) / 2);
+          return Math.round((index / (count - 1)) * (rowCount - 1));
+        };
+
         for (let i = 0; i < inputs.length; i++) {
-          const t = (inputs.length === 1) ? 0.5 : (i / (inputs.length - 1));
-          const y = portStart - t * portSpan;
+          const y = rowY(rowIndexForPort(i, inputs.length));
           const port = inputs[i];
-          const p = makePort((-w / 2) - 4, y, 'in', port);
+          const p = makePort((-w / 2) - 2, y, 'in', port);
+          const portName = makeTinyLabelSprite(fitLabel(port.name || port.id || 'in', 14));
+          portName.position.set((-w / 2) + 20, y, 6.6);
           ports.in.push({ mesh: p, port: port });
           ports.byId.set(port.id, p);
-          group.add(p);
+          group.add(p, portName);
         }
         for (let i = 0; i < outputs.length; i++) {
-          const t = (outputs.length === 1) ? 0.5 : (i / (outputs.length - 1));
-          const y = portStart - t * portSpan;
+          const y = rowY(rowIndexForPort(i, outputs.length));
           const port = outputs[i];
-          const p = makePort((w / 2) + 4, y, 'out', port);
+          const p = makePort((w / 2) + 2, y, 'out', port);
+          const portName = makeTinyLabelSprite(fitLabel(port.name || port.id || 'out', 14));
+          portName.position.set((w / 2) - 44, y, 6.6);
           ports.out.push({ mesh: p, port: port });
           ports.byId.set(port.id, p);
-          group.add(p);
+          group.add(p, portName);
         }
 
-        group.add(body, header, accent, icon, label);
+        const outline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, 8.1)),
+          new THREE.LineBasicMaterial({
+            color: 0x3b4557,
+            transparent: true,
+            opacity: 0.55
+          })
+        );
+
+        group.add(shadow, body, contentPanel, header, nodeTopLine, accent, icon, label, outline);
         nodeGroup.add(group);
         nodeBodies.push(body);
         nodeByMeshUuid.set(body.uuid, node);
@@ -1507,14 +1654,14 @@ export class CircuitPanel {
       for (let ei = 0; ei < visibleGraph.edges.length; ei++) {
         const edge = visibleGraph.edges[ei];
         const lineGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-        const edgeColor = edge.kind === 'architecture' ? 0x818cf8 : 0x3b82f6;
-        const lineMat = new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: edge.kind === 'architecture' ? 0.38 : 0.28 });
+        const edgeColor = edge.kind === 'architecture' ? 0x98a2b3 : 0xb8c2d0;
+        const lineMat = new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: edge.kind === 'architecture' ? 0.42 : 0.34 });
         const line = new THREE.Line(lineGeom, lineMat);
         edgeGroup.add(line);
 
         const arrow = new THREE.Mesh(
           new THREE.ConeGeometry(6.2, 16, 14),
-          new THREE.MeshBasicMaterial({ color: edgeColor, transparent: true, opacity: 0.55 })
+          new THREE.MeshBasicMaterial({ color: edgeColor, transparent: true, opacity: 0.62 })
         );
         arrow.rotation.z = Math.PI / 2;
         arrow.visible = !isArchitectureMode;
@@ -1743,12 +1890,12 @@ export class CircuitPanel {
 
       if (mode === 'off') {
         bodyMat.color.setHex(NODE_BODY_COLOR);
-        bodyMat.emissive.setHex(0x08111f);
-        bodyMat.emissiveIntensity = 0.18;
+        bodyMat.emissive.setHex(0x090d13);
+        bodyMat.emissiveIntensity = 0.2;
         if (headerMat) {
           headerMat.color.setHex(NODE_HEADER_COLOR);
-          headerMat.emissive.setHex(0x0b1830);
-          headerMat.emissiveIntensity = 0.12;
+          headerMat.emissive.setHex(0x111827);
+          headerMat.emissiveIntensity = 0.16;
         }
         if (accentMat) {
           accentMat.color.setHex(meta.baseColor || NODE_ACCENT_COLOR);
@@ -1769,13 +1916,13 @@ export class CircuitPanel {
 
       const linked = mode === 'linked';
       const focus = mode === 'focus';
-      bodyMat.color.setHex(focus ? 0x1e3a8a : 0x172554);
-      bodyMat.emissive.setHex(focus ? 0x2c5ed3 : 0x1b3a77);
-      bodyMat.emissiveIntensity = focus ? 0.62 : 0.4;
+      bodyMat.color.setHex(focus ? 0x22324d : 0x202734);
+      bodyMat.emissive.setHex(focus ? 0x1e3a5f : 0x15253d);
+      bodyMat.emissiveIntensity = focus ? 0.42 : 0.26;
       if (headerMat) {
-        headerMat.color.setHex(focus ? 0x2563eb : 0x1d4ed8);
-        headerMat.emissive.setHex(focus ? 0x3b82f6 : 0x2563eb);
-        headerMat.emissiveIntensity = focus ? 0.42 : 0.28;
+        headerMat.color.setHex(focus ? 0x2f3f57 : 0x2a364a);
+        headerMat.emissive.setHex(focus ? 0x1f4b72 : 0x1e3a5f);
+        headerMat.emissiveIntensity = focus ? 0.34 : 0.24;
       }
       if (accentMat) {
         accentMat.color.setHex(focus ? 0x22c55e : 0x4ade80);
@@ -1802,6 +1949,7 @@ export class CircuitPanel {
     let hoveredNodeId = null;
     let selectedNodeId = null;
     const contextBotId = 'context:bot';
+    let ctrlConnectSourceNodeId = null;
     let dragging = null; // { nodeId, startX, startY, moved }
     if (skeletonRootNodeId) {
       selectedNodeId = skeletonRootNodeId;
@@ -1910,7 +2058,7 @@ export class CircuitPanel {
         modeHint.textContent =
           viewMode === 'architecture'
             ? ('Architecture view: grouped by layers. Click a layer to collapse. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'))
-            : ('Runtime view: function call/data-flow with ports and animated movement. Click output port, then Context Bot to connect context (repeat to detach). Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
+            : ('Runtime view: function call/data-flow with ports and animated movement. Click output port, then Context Bot to connect context (repeat to detach). Fast toggle: hold Ctrl and click a node, then Ctrl+click Context Bot. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
       }
       if (collapseAllBtn) {
         collapseAllBtn.disabled = viewMode !== 'architecture';
@@ -2107,12 +2255,39 @@ export class CircuitPanel {
     function onPointerDown(ev) {
       hideNodeMenu();
       updatePointer(ev);
+      const isCtrlClick = (ev.button === 0) && !!ev.ctrlKey;
+
+      const handleCtrlConnectClick = (nodeId) => {
+        const prevSelectedNodeId = selectedNodeId;
+        const clickedNode = nodeMeta.get(nodeId)?.node || null;
+        selectedNodeId = nodeId;
+        if (clickedNode) {
+          setDetails(clickedNode);
+        }
+        if (nodeId === contextBotId) {
+          const sourceNodeId =
+            (ctrlConnectSourceNodeId && ctrlConnectSourceNodeId !== contextBotId)
+              ? ctrlConnectSourceNodeId
+              : (prevSelectedNodeId && prevSelectedNodeId !== contextBotId ? prevSelectedNodeId : null);
+          if (sourceNodeId) {
+            toggleContextConnectionForNode(sourceNodeId);
+          }
+          return true;
+        }
+
+        ctrlConnectSourceNodeId = nodeId;
+        if (prevSelectedNodeId === contextBotId) {
+          toggleContextConnectionForNode(nodeId);
+        }
+        return true;
+      };
 
       // If clicking a port, show tooltip (no navigation).
       raycaster.setFromCamera(pointer, camera);
       const portHits = raycaster.intersectObjects(portMeshes, false);
       const phit = portHits[0] && portHits[0].object ? portHits[0].object : null;
       if (phit && phit.userData && phit.userData.kind === 'port') {
+        setActivePort(phit);
         const nodeId = String(phit.userData.nodeId || '');
         const direction = String(phit.userData.direction || '');
         if (connectPreview.active && nodeId === contextBotId && direction === 'in') {
@@ -2131,12 +2306,29 @@ export class CircuitPanel {
         return;
       }
       hidePortTip();
+      if (!phit) {
+        setActivePort(null);
+      }
 
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(nodeBodies, false);
       const hit = hits[0] && hits[0].object ? hits[0].object : null;
       if (hit && hit.userData && hit.userData.nodeId) {
         const nodeId = hit.userData.nodeId;
+        const isPrimaryClick = ev.button === 0;
+
+        // Ctrl + node body arms a source node. Then a normal click on Context Bot toggles
+        // connect/disconnect from that armed source.
+        if (!isCtrlClick && isPrimaryClick && ctrlConnectSourceNodeId && nodeId === contextBotId) {
+          toggleContextConnectionForNode(ctrlConnectSourceNodeId);
+          return;
+        }
+
+        if (isCtrlClick) {
+          handleCtrlConnectClick(nodeId);
+          return;
+        }
+
         if (connectPreview.active && nodeId === contextBotId) {
           completeContextConnect();
           return;
@@ -2144,7 +2336,9 @@ export class CircuitPanel {
         if (connectPreview.active && nodeId !== contextBotId) {
           cancelContextConnect();
         }
+        ctrlConnectSourceNodeId = null;
         if (ev.button === 2) {
+          setActivePort(null);
           selectedNodeId = nodeId;
           const node = nodeMeta.get(nodeId)?.node;
           if (node) {
@@ -2170,6 +2364,7 @@ export class CircuitPanel {
 
       // Pan background if Hand mode enabled (left mouse).
       if (handMode && ev.button === 0) {
+        setActivePort(null);
         panning = {
           startX: ev.clientX,
           startY: ev.clientY,
@@ -2185,6 +2380,9 @@ export class CircuitPanel {
 
       if (connectPreview.active && ev.button === 0) {
         cancelContextConnect();
+      }
+      if (ev.button === 0) {
+        setActivePort(null);
       }
     }
 
@@ -2577,11 +2775,11 @@ export class CircuitPanel {
       // Edge styling: dim by default, highlight connected edges on hover.
       for (let i = 0; i < edges.length; i++) {
         const e = edges[i];
-        const baseColor = e.edge.kind === 'architecture' ? 0x818cf8 : 0x3b82f6;
-        const baseOpacity = e.edge.kind === 'architecture' ? 0.34 : 0.22;
+        const baseColor = e.edge.kind === 'architecture' ? 0x98a2b3 : 0xb8c2d0;
+        const baseOpacity = e.edge.kind === 'architecture' ? 0.42 : 0.34;
         e.line.material.opacity = baseOpacity;
         e.line.material.color.setHex(baseColor);
-        e.arrow.material.opacity = e.isArchitectureMode ? 0 : 0.35;
+        e.arrow.material.opacity = e.isArchitectureMode ? 0 : 0.46;
         e.arrow.material.color.setHex(baseColor);
       }
       // Node styling: reset before hover/selection highlights.

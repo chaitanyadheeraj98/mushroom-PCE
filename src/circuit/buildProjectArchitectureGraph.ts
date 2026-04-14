@@ -9,7 +9,6 @@ type BuildOptions = {
 const DEFAULT_MAX_FILES = 240;
 
 export async function buildProjectArchitectureGraph(
-	activeUri?: vscode.Uri,
 	options?: BuildOptions
 ): Promise<CircuitGraph> {
 	const maxFiles = Math.max(20, options?.maxFiles ?? DEFAULT_MAX_FILES);

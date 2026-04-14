@@ -156,7 +156,7 @@ export class CircuitDetailsPanel {
 		if (!this.currentNode) {
 			return;
 		}
-		this.panel.webview.html = renderHtml(this.panel.webview, this.currentNode, this.currentSnippet, this.chatTurns, this.asking);
+		this.panel.webview.html = renderHtml(this.currentNode, this.currentSnippet, this.chatTurns, this.asking);
 	}
 
 	private getConnectionContext(node: CircuitNode): { incoming: string[]; outgoing: string[] } {
@@ -325,7 +325,7 @@ function inferScriptKind(languageId: string): ts.ScriptKind {
 	}
 }
 
-function renderHtml(webview: vscode.Webview, node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[], asking: boolean): string {
+function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[], asking: boolean): string {
 	const nonce = getNonce();
 	const esc = (s: string) =>
 		s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');

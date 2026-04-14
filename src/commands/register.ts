@@ -168,7 +168,7 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 			async (node, currentGraph) => buildGlobalSkeletonGraph(node, currentGraph, 3),
 			async (scope) => {
 				if (scope === 'full-architecture') {
-					return buildProjectArchitectureGraph(doc.uri);
+					return buildProjectArchitectureGraph();
 				}
 				if (scope === 'codeflow') {
 					const currentDoc = deps.getCurrentDocument();
