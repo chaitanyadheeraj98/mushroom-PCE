@@ -11,6 +11,7 @@ export type NodeChatTurn = {
 export type NodeChatRequest = {
 	node: CircuitNode;
 	snippet: string;
+	developerAnalysis?: string;
 	question: string;
 	history: NodeChatTurn[];
 	connectionContext: {
@@ -54,6 +55,14 @@ export class CircuitDetailsPanel {
 		return CircuitDetailsPanel.currentPanel;
 	}
 
+	static async syncGraph(graph: CircuitGraph): Promise<void> {
+		if (!CircuitDetailsPanel.currentPanel) {
+			return;
+		}
+		CircuitDetailsPanel.currentPanel.currentGraph = graph;
+		await CircuitDetailsPanel.currentPanel.refreshForGraphChange();
+	}
+
 	private constructor(panel: vscode.WebviewPanel, graph: CircuitGraph, onAsk?: (request: NodeChatRequest) => Promise<string>) {
 		this.panel = panel;
 		this.onAsk = onAsk;
@@ -90,6 +99,17 @@ export class CircuitDetailsPanel {
 			this.chatTurns = [];
 		}
 		this.render();
+	}
+
+	private async refreshForGraphChange(): Promise<void> {
+		if (!this.currentNode) {
+			return;
+		}
+		// Live-refresh Context Bot snippet when connections change.
+		if (this.currentNode.id === 'context:bot') {
+			this.currentSnippet = await this.getContextBotSnippet(this.currentNode);
+			this.render();
+		}
 	}
 
 	private async getContextBotSnippet(node: CircuitNode): Promise<string> {

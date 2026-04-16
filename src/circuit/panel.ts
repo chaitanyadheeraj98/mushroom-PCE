@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 
+import { CircuitDetailsPanel } from './detailsPanel';
 import { CircuitGraph, CircuitNode } from './types';
 
 export class CircuitPanel {
@@ -121,6 +122,7 @@ export class CircuitPanel {
 	setGraph(graph: CircuitGraph): void {
 		this.graph = graph;
 		this.panel.webview.postMessage({ type: 'graph', graph });
+		void CircuitDetailsPanel.syncGraph(graph);
 	}
 
 	private async openSkeletonPanel(rootNodeId: string, nodeLabel?: string): Promise<void> {
@@ -2256,6 +2258,10 @@ export class CircuitPanel {
       hideNodeMenu();
       updatePointer(ev);
       const isCtrlClick = (ev.button === 0) && !!ev.ctrlKey;
+      if (ev.button === 2) {
+        // Right click / two-finger tap is handled by the contextmenu event only.
+        return;
+      }
 
       const handleCtrlConnectClick = (nodeId) => {
         const prevSelectedNodeId = selectedNodeId;
@@ -2337,19 +2343,6 @@ export class CircuitPanel {
           cancelContextConnect();
         }
         ctrlConnectSourceNodeId = null;
-        if (ev.button === 2) {
-          setActivePort(null);
-          selectedNodeId = nodeId;
-          const node = nodeMeta.get(nodeId)?.node;
-          if (node) {
-            setDetails(node);
-            if (vscode && (node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility')) {
-              vscode.postMessage({ type: 'navigate', node: node, graph });
-            }
-          }
-          showNodeMenu(ev.clientX, ev.clientY, nodeId);
-          return;
-        }
         for (let i = nodeAnimations.length - 1; i >= 0; i--) {
           if (nodeAnimations[i].nodeId === nodeId) {
             nodeAnimations.splice(i, 1);
@@ -2417,7 +2410,7 @@ export class CircuitPanel {
             setDetails(node);
           }
           if (node && vscode && (node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility')) {
-            vscode.postMessage({ type: 'navigate', node: node });
+            vscode.postMessage({ type: 'navigate', node: node, graph });
           }
 
           // CodeFlow behavior: clicking current step advances focus to next step.
@@ -2429,7 +2422,7 @@ export class CircuitPanel {
               if (nextNode) {
                 setDetails(nextNode);
                 if (vscode) {
-                  vscode.postMessage({ type: 'navigate', node: nextNode });
+                  vscode.postMessage({ type: 'navigate', node: nextNode, graph });
                 }
               }
             }
@@ -2463,9 +2456,6 @@ export class CircuitPanel {
         const node = nodeMeta.get(nodeId)?.node;
         if (node) {
           setDetails(node);
-          if (vscode && (node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility')) {
-            vscode.postMessage({ type: 'navigate', node: node, graph });
-          }
         }
         showNodeMenu(ev.clientX, ev.clientY, nodeId);
       } else {

@@ -23,6 +23,7 @@ export function activate(context: vscode.ExtensionContext) {
 	let symbolIndexTimer: ReturnType<typeof setTimeout> | undefined;
 	type CacheEntry = { text: string; updatedAt: number; docVersion: number };
 	const analysisCache = new Map<string, CacheEntry>();
+	const nodeDeveloperContextCache = new Map<string, CacheEntry>();
 
 	const rememberEditor = (editor: vscode.TextEditor | undefined): void => {
 		if (!editor) {
@@ -216,6 +217,27 @@ export function activate(context: vscode.ExtensionContext) {
 		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
 		if (!model) {
 			return 'No AI model is currently available. Open Copilot/Chat model access and try again.';
+		}
+
+		if (String(request.node.label || '').toLowerCase().includes('context bot')) {
+			const doc = getCurrentDocument();
+			if (doc) {
+				const cacheKey = `${doc.uri.toString()}::${model.id}::developer-context`;
+				const cached = nodeDeveloperContextCache.get(cacheKey);
+				if (cached && cached.docVersion === doc.version) {
+					request.developerAnalysis = cached.text;
+				} else {
+					const generated = await explainCode(model, doc.getText(), doc.languageId, 'developer');
+					if (generated?.trim()) {
+						request.developerAnalysis = generated;
+						nodeDeveloperContextCache.set(cacheKey, {
+							text: generated,
+							updatedAt: Date.now(),
+							docVersion: doc.version
+						});
+					}
+				}
+			}
 		}
 
 		const prompt = buildNodeDetailsPrompt(request);
