@@ -12,7 +12,8 @@ export class CircuitPanel {
 	private readonly onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>;
 	private readonly onRequestGraph?: (
 		scope: 'current-file' | 'full-architecture' | 'codeflow',
-		currentGraph: CircuitGraph
+		currentGraph: CircuitGraph,
+		options?: { dependencyMode?: 'imports' | 'imports-calls' }
 	) => Promise<CircuitGraph | undefined>;
 	private graph: CircuitGraph;
 	private readonly isPrimaryPanel: boolean;
@@ -24,7 +25,8 @@ export class CircuitPanel {
 		onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>,
 		onRequestGraph?: (
 			scope: 'current-file' | 'full-architecture' | 'codeflow',
-			currentGraph: CircuitGraph
+			currentGraph: CircuitGraph,
+			options?: { dependencyMode?: 'imports' | 'imports-calls' }
 		) => Promise<CircuitGraph | undefined>
 	): CircuitPanel {
 		if (CircuitPanel.currentPanel) {
@@ -54,7 +56,8 @@ export class CircuitPanel {
 		onBuildSkeletonGraph?: (node: CircuitNode, graph: CircuitGraph) => Promise<CircuitGraph | undefined>,
 		onRequestGraph?: (
 			scope: 'current-file' | 'full-architecture' | 'codeflow',
-			currentGraph: CircuitGraph
+			currentGraph: CircuitGraph,
+			options?: { dependencyMode?: 'imports' | 'imports-calls' }
 		) => Promise<CircuitGraph | undefined>,
 		options?: { initialSkeletonRootNodeId?: string; initialViewMode?: 'architecture' | 'runtime'; isPrimaryPanel?: boolean }
 	) {
@@ -84,7 +87,9 @@ export class CircuitPanel {
 					this.onRequestGraph &&
 					(msg?.scope === 'current-file' || msg?.scope === 'full-architecture' || msg?.scope === 'codeflow')
 				) {
-					const nextGraph = await this.onRequestGraph(msg.scope, this.graph);
+					const nextGraph = await this.onRequestGraph(msg.scope, this.graph, {
+						dependencyMode: msg?.dependencyMode === 'imports-calls' ? 'imports-calls' : 'imports'
+					});
 					if (nextGraph) {
 						this.setGraph(nextGraph);
 					}
@@ -549,6 +554,13 @@ export class CircuitPanel {
           </div>
         </div>
         <div class="hud-section">
+          <div class="hud-section-title">Dependencies</div>
+          <div class="hud-option-grid two-col">
+            <button id="depImportsBtn" class="mini-btn">Imports/Exports</button>
+            <button id="depImportsCallsBtn" class="mini-btn">+ Call Hierarchy</button>
+          </div>
+        </div>
+        <div class="hud-section">
           <div class="hud-section-title">Edges</div>
           <div class="hud-option-grid">
             <button id="edgeFilterBtn" class="mini-btn">Edges: All</button>
@@ -603,6 +615,8 @@ export class CircuitPanel {
     const fullArchitectureBtn = document.getElementById('fullArchitectureBtn');
     const currentFileBtn = document.getElementById('currentFileBtn');
     const codeFlowBtn = document.getElementById('codeFlowBtn');
+    const depImportsBtn = document.getElementById('depImportsBtn');
+    const depImportsCallsBtn = document.getElementById('depImportsCallsBtn');
     const edgeFilterBtn = document.getElementById('edgeFilterBtn');
     const includeExternalBtn = document.getElementById('includeExternalBtn');
     const disconnectContextBtn = document.getElementById('disconnectContextBtn');
@@ -618,6 +632,8 @@ export class CircuitPanel {
     let skeletonRootNodeId = ${initialSkeletonRootNodeIdJson};
     let skeletonNodeIds = null; // Set<string> | null
     let edgeFilterMode = 'all'; // 'all' | 'api-high'
+    let fullArchitectureDependencyMode = 'imports'; // 'imports' | 'imports-calls'
+    let currentGraphScope = 'current-file'; // 'current-file' | 'full-architecture' | 'codeflow'
     let menuNodeId = null;
     let hudMinimized = false;
     let hudMaximized = false;
@@ -638,6 +654,12 @@ export class CircuitPanel {
       }
       if (saved && (saved.edgeFilterMode === 'all' || saved.edgeFilterMode === 'api-high')) {
         edgeFilterMode = saved.edgeFilterMode;
+      }
+      if (saved && (saved.fullArchitectureDependencyMode === 'imports' || saved.fullArchitectureDependencyMode === 'imports-calls')) {
+        fullArchitectureDependencyMode = saved.fullArchitectureDependencyMode;
+      }
+      if (saved && (saved.currentGraphScope === 'current-file' || saved.currentGraphScope === 'full-architecture' || saved.currentGraphScope === 'codeflow')) {
+        currentGraphScope = saved.currentGraphScope;
       }
       hudMinimized = !!saved?.hudMinimized;
       hudMaximized = !!saved?.hudMaximized;
@@ -824,7 +846,7 @@ export class CircuitPanel {
       return spr;
     }
 
-    function makeEdgeLabel(text) {
+    function makeEdgeLabel(text, accentHex) {
       const canvasEl = document.createElement('canvas');
       const ctx = canvasEl.getContext('2d');
       const font = '600 12px Segoe UI, Tahoma, sans-serif';
@@ -838,11 +860,12 @@ export class CircuitPanel {
       ctx.fillStyle = 'rgba(15, 23, 42, 0.78)';
       roundRect(ctx, 0, 0, w, h, 8);
       ctx.fill();
-      ctx.strokeStyle = 'rgba(33, 48, 77, 0.95)';
+      const accentColor = (typeof accentHex === 'number') ? ('#' + accentHex.toString(16).padStart(6, '0')) : '#3b82f6';
+      ctx.strokeStyle = accentColor;
       ctx.lineWidth = 1;
       roundRect(ctx, 0.5, 0.5, w - 1, h - 1, 8);
       ctx.stroke();
-      ctx.fillStyle = '#cbd5e1';
+      ctx.fillStyle = '#e2e8f0';
       ctx.textBaseline = 'middle';
       ctx.fillText(text, 9, h / 2);
 
@@ -981,6 +1004,29 @@ export class CircuitPanel {
 
     function edgeIsApiHigh(edge) {
       return String(edge?.label || '').toLowerCase().includes('[api-high]');
+    }
+
+    function getEdgeTheme(edge) {
+      const label = String(edge?.label || '').toLowerCase();
+      if (label.includes('imports')) {
+        return {
+          baseColor: 0xa78bfa,
+          focusColor: 0xc084fc,
+          baseOpacity: edge.kind === 'architecture' ? 0.5 : 0.4
+        };
+      }
+      if (label.includes('calls')) {
+        return {
+          baseColor: 0x60a5fa,
+          focusColor: 0x38bdf8,
+          baseOpacity: edge.kind === 'architecture' ? 0.5 : 0.42
+        };
+      }
+      return {
+        baseColor: edge.kind === 'architecture' ? 0x98a2b3 : 0xb8c2d0,
+        focusColor: 0x22c55e,
+        baseOpacity: edge.kind === 'architecture' ? 0.42 : 0.34
+      };
     }
 
     function isCodeFlowEdge(edge) {
@@ -1656,8 +1702,9 @@ export class CircuitPanel {
       for (let ei = 0; ei < visibleGraph.edges.length; ei++) {
         const edge = visibleGraph.edges[ei];
         const lineGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-        const edgeColor = edge.kind === 'architecture' ? 0x98a2b3 : 0xb8c2d0;
-        const lineMat = new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: edge.kind === 'architecture' ? 0.42 : 0.34 });
+        const edgeTheme = getEdgeTheme(edge);
+        const edgeColor = edgeTheme.baseColor;
+        const lineMat = new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: edgeTheme.baseOpacity });
         const line = new THREE.Line(lineGeom, lineMat);
         edgeGroup.add(line);
 
@@ -1679,7 +1726,7 @@ export class CircuitPanel {
         const laneCount = laneTotals.get(laneKey) || 1;
 
         const showLabel = edge.label && edge.label !== 'calls';
-        const label = showLabel ? makeEdgeLabel(edge.label) : null;
+        const label = showLabel ? makeEdgeLabel(edge.label, edgeTheme.baseColor) : null;
         if (label) {
           labelGroup.add(label);
         }
@@ -1694,6 +1741,7 @@ export class CircuitPanel {
           curve: null,
           laneIndex: laneIndex,
           laneCount: laneCount,
+          theme: edgeTheme,
           isArchitectureMode: isArchitectureMode
         });
 
@@ -1984,6 +2032,8 @@ export class CircuitPanel {
           viewMode: viewMode,
           collapsedLayers: Array.from(collapsedLayers),
           edgeFilterMode: edgeFilterMode,
+          fullArchitectureDependencyMode: fullArchitectureDependencyMode,
+          currentGraphScope: currentGraphScope,
           hudMinimized: hudMinimized,
           hudMaximized: hudMaximized,
           viewLocked: viewLocked
@@ -2056,11 +2106,26 @@ export class CircuitPanel {
       if (edgeFilterBtn) {
         edgeFilterBtn.textContent = edgeFilterMode === 'api-high' ? 'Edges: API-high' : 'Edges: All';
       }
+      if (depImportsBtn) {
+        depImportsBtn.classList.toggle('active', fullArchitectureDependencyMode === 'imports');
+        depImportsBtn.disabled = currentGraphScope !== 'full-architecture';
+      }
+      if (depImportsCallsBtn) {
+        depImportsCallsBtn.classList.toggle('active', fullArchitectureDependencyMode === 'imports-calls');
+        depImportsCallsBtn.disabled = currentGraphScope !== 'full-architecture';
+      }
       if (modeHint) {
-        modeHint.textContent =
-          viewMode === 'architecture'
-            ? ('Architecture view: grouped by layers. Click a layer to collapse. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'))
-            : ('Runtime view: function call/data-flow with ports and animated movement. Click output port, then Context Bot to connect context (repeat to detach). Fast toggle: hold Ctrl and click a node, then Ctrl+click Context Bot. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
+        if (currentGraphScope === 'full-architecture') {
+          modeHint.textContent =
+            'Full Architecture: 1-hop file dependencies from current file (' +
+            (fullArchitectureDependencyMode === 'imports-calls' ? 'imports + call hierarchy' : 'imports/exports only') +
+            '). Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All');
+        } else {
+          modeHint.textContent =
+            viewMode === 'architecture'
+              ? ('Architecture view: grouped by layers. Click a layer to collapse. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'))
+              : ('Runtime view: function call/data-flow with ports and animated movement. Click output port, then Context Bot to connect context (repeat to detach). Fast toggle: hold Ctrl and click a node, then Ctrl+click Context Bot. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
+        }
       }
       if (collapseAllBtn) {
         collapseAllBtn.disabled = viewMode !== 'architecture';
@@ -2083,6 +2148,7 @@ export class CircuitPanel {
       if (!vscode) {
         return;
       }
+      currentGraphScope = scope;
       if (scope === 'full-architecture') {
         skeletonRootNodeId = null;
         skeletonNodeIds = null;
@@ -2097,7 +2163,7 @@ export class CircuitPanel {
         // Keep current mode, but reset collapsed state so users see nodes immediately.
         collapsedLayers.clear();
       }
-      const targetBtn = scope === 'full-architecture' ? fullArchitectureBtn : currentFileBtn;
+      const targetBtn = scope === 'full-architecture' ? fullArchitectureBtn : (scope === 'codeflow' ? codeFlowBtn : currentFileBtn);
       const otherBtns = [fullArchitectureBtn, currentFileBtn, codeFlowBtn].filter((btn) => btn && btn !== targetBtn);
       const previous = targetBtn?.textContent || '';
       if (targetBtn) {
@@ -2107,7 +2173,9 @@ export class CircuitPanel {
       for (let i = 0; i < otherBtns.length; i++) {
         otherBtns[i].disabled = true;
       }
-      vscode.postMessage({ type: 'requestGraph', scope });
+      if (depImportsBtn) depImportsBtn.disabled = true;
+      if (depImportsCallsBtn) depImportsCallsBtn.disabled = true;
+      vscode.postMessage({ type: 'requestGraph', scope, dependencyMode: fullArchitectureDependencyMode });
       // unlock locally after small grace period; host will push graph when ready.
       setTimeout(() => {
         if (targetBtn) {
@@ -2123,6 +2191,8 @@ export class CircuitPanel {
         for (let i = 0; i < otherBtns.length; i++) {
           otherBtns[i].disabled = false;
         }
+        if (depImportsBtn) depImportsBtn.disabled = currentGraphScope !== 'full-architecture';
+        if (depImportsCallsBtn) depImportsCallsBtn.disabled = currentGraphScope !== 'full-architecture';
       }, 1200);
     }
 
@@ -2470,6 +2540,20 @@ export class CircuitPanel {
     fullArchitectureBtn?.addEventListener('click', () => requestGraphScope('full-architecture'));
     currentFileBtn?.addEventListener('click', () => requestGraphScope('current-file'));
     codeFlowBtn?.addEventListener('click', () => requestGraphScope('codeflow'));
+    depImportsBtn?.addEventListener('click', () => {
+      fullArchitectureDependencyMode = 'imports';
+      updateModeUi();
+      if (currentGraphScope === 'full-architecture') {
+        requestGraphScope('full-architecture');
+      }
+    });
+    depImportsCallsBtn?.addEventListener('click', () => {
+      fullArchitectureDependencyMode = 'imports-calls';
+      updateModeUi();
+      if (currentGraphScope === 'full-architecture') {
+        requestGraphScope('full-architecture');
+      }
+    });
     edgeFilterBtn?.addEventListener('click', toggleEdgeFilterMode);
     includeExternalBtn?.addEventListener('click', includeExternalNeighborsForSelected);
     disconnectContextBtn?.addEventListener('click', () => {
@@ -2765,8 +2849,8 @@ export class CircuitPanel {
       // Edge styling: dim by default, highlight connected edges on hover.
       for (let i = 0; i < edges.length; i++) {
         const e = edges[i];
-        const baseColor = e.edge.kind === 'architecture' ? 0x98a2b3 : 0xb8c2d0;
-        const baseOpacity = e.edge.kind === 'architecture' ? 0.42 : 0.34;
+        const baseColor = e.theme?.baseColor ?? (e.edge.kind === 'architecture' ? 0x98a2b3 : 0xb8c2d0);
+        const baseOpacity = e.theme?.baseOpacity ?? (e.edge.kind === 'architecture' ? 0.42 : 0.34);
         e.line.material.opacity = baseOpacity;
         e.line.material.color.setHex(baseColor);
         e.arrow.material.opacity = e.isArchitectureMode ? 0 : 0.46;
@@ -2793,9 +2877,9 @@ export class CircuitPanel {
           connectedNodeIds.add(e.edge.from);
           connectedNodeIds.add(e.edge.to);
           e.line.material.opacity = e.edge.kind === 'architecture' ? 0.62 : 0.78;
-          e.line.material.color.setHex(0x22c55e);
+          e.line.material.color.setHex(e.theme?.focusColor ?? 0x22c55e);
           e.arrow.material.opacity = e.isArchitectureMode ? 0 : 0.65;
-          e.arrow.material.color.setHex(0x22c55e);
+          e.arrow.material.color.setHex(e.theme?.focusColor ?? 0x22c55e);
         }
         for (const id of connectedNodeIds) {
           setNodeHighlight(id, id === focusNodeId ? 'focus' : 'linked');

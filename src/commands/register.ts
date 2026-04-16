@@ -166,9 +166,11 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 				await CircuitDetailsPanel.createOrShow(node, currentGraph, deps.askNodeQuestion);
 			},
 			async (node, currentGraph) => buildGlobalSkeletonGraph(node, currentGraph, 3),
-			async (scope) => {
+			async (scope, _currentGraph, options) => {
 				if (scope === 'full-architecture') {
-					return buildProjectArchitectureGraph();
+					return buildProjectArchitectureGraph(deps.getCurrentDocument(), {
+						dependencyMode: options?.dependencyMode === 'imports-calls' ? 'imports-calls' : 'imports'
+					});
 				}
 				if (scope === 'codeflow') {
 					const currentDoc = deps.getCurrentDocument();
