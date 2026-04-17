@@ -3,6 +3,9 @@ import * as ts from 'typescript';
 
 import { CircuitEdge, CircuitGraph, CircuitNode } from './types';
 
+const FILE_SNIPPET_MAX_LINES = 400;
+const FILE_SNIPPET_MAX_CHARS = 24000;
+
 export type NodeChatTurn = {
 	role: 'user' | 'assistant';
 	text: string;
@@ -33,7 +36,7 @@ export class CircuitDetailsPanel {
 	private asking = false;
 
 	static async createOrShow(
-		node: CircuitNode,
+		node: CircuitNode | undefined,
 		graph: CircuitGraph,
 		onAsk?: (request: NodeChatRequest) => Promise<string>
 	): Promise<CircuitDetailsPanel> {
@@ -78,6 +81,7 @@ export class CircuitDetailsPanel {
 			null,
 			this.disposables
 		);
+		this.render();
 	}
 
 	dispose(): void {
@@ -87,7 +91,14 @@ export class CircuitDetailsPanel {
 		}
 	}
 
-	private async setNode(node: CircuitNode): Promise<void> {
+	private async setNode(node: CircuitNode | undefined): Promise<void> {
+		if (!node) {
+			this.currentNode = undefined;
+			this.currentSnippet = '';
+			this.chatTurns = [];
+			this.render();
+			return;
+		}
 		const nodeChanged = this.currentNode?.id !== node.id;
 		this.currentNode = node;
 		if (node.id === 'context:bot') {
@@ -173,10 +184,9 @@ export class CircuitDetailsPanel {
 	}
 
 	private render(): void {
-		if (!this.currentNode) {
-			return;
-		}
-		this.panel.webview.html = renderHtml(this.currentNode, this.currentSnippet, this.chatTurns, this.asking);
+		this.panel.webview.html = this.currentNode
+			? renderHtml(this.currentNode, this.currentSnippet, this.chatTurns, this.asking)
+			: renderEmptyHtml();
 	}
 
 	private getConnectionContext(node: CircuitNode): { incoming: string[]; outgoing: string[] } {
@@ -210,11 +220,15 @@ function describeEdge(edge: CircuitEdge, nodeById: Map<string, CircuitNode>, dir
 
 async function getSnippet(node: CircuitNode): Promise<string> {
 	try {
-		if (!node.uri || typeof node.line !== 'number') {
+		if (!node.uri) {
 			return '';
 		}
 
 		const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(node.uri));
+		if (typeof node.line !== 'number') {
+			return getFileSnippet(doc);
+		}
+
 		const astSnippet = tryGetAstSnippet(doc, node);
 		if (astSnippet) {
 			return astSnippet;
@@ -259,6 +273,32 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 	} catch {
 		return '';
 	}
+}
+
+function getFileSnippet(doc: vscode.TextDocument): string {
+	const totalLines = doc.lineCount;
+	const cappedEndLine = Math.max(0, Math.min(totalLines, FILE_SNIPPET_MAX_LINES));
+	const fullRange = new vscode.Range(
+		new vscode.Position(0, 0),
+		new vscode.Position(Math.max(0, cappedEndLine - 1), doc.lineAt(Math.max(0, cappedEndLine - 1)).text.length)
+	);
+	let snippet = doc.getText(fullRange);
+	let wasTruncated = totalLines > FILE_SNIPPET_MAX_LINES;
+
+	if (snippet.length > FILE_SNIPPET_MAX_CHARS) {
+		snippet = snippet.slice(0, FILE_SNIPPET_MAX_CHARS);
+		wasTruncated = true;
+	}
+
+	if (wasTruncated) {
+		const shownLines = Math.min(totalLines, FILE_SNIPPET_MAX_LINES);
+		snippet += `\n\n...truncated... showing first ${shownLines} lines (${Math.min(
+			FILE_SNIPPET_MAX_CHARS,
+			snippet.length
+		)} chars)`;
+	}
+
+	return snippet;
 }
 
 function tryGetAstSnippet(doc: vscode.TextDocument, node: CircuitNode): string | undefined {
@@ -471,6 +511,48 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
       chatLog.scrollTop = chatLog.scrollHeight;
     }
   </script>
+</body>
+</html>`;
+}
+
+function renderEmptyHtml(): string {
+	const nonce = getNonce();
+	return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mushroom PCE: Node Details</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 16px;
+      background: radial-gradient(circle at top right, #1e293b, #0b1020 55%);
+      color: #e2e8f0;
+      font-family: Segoe UI, Tahoma, sans-serif;
+    }
+    .card {
+      border: 1px solid #21304d;
+      background: #0f172a;
+      border-radius: 12px;
+      padding: 14px;
+      color: #9fb0cc;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .title {
+      color: #f8fafc;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">Node Details</div>
+    <div>Select a valid node in Circuit Mode to view its code snippet and chat context.</div>
+  </div>
 </body>
 </html>`;
 }

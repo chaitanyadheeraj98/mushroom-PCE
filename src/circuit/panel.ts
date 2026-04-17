@@ -17,6 +17,7 @@ export class CircuitPanel {
 	) => Promise<CircuitGraph | undefined>;
 	private graph: CircuitGraph;
 	private readonly isPrimaryPanel: boolean;
+	private lastUnresolvedNodeId?: string;
 
 	static createOrShow(
 		extensionUri: vscode.Uri,
@@ -71,11 +72,23 @@ export class CircuitPanel {
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 		this.panel.webview.onDidReceiveMessage(
 			async (msg) => {
-				if (msg?.type === 'navigate' && msg?.node && this.onNavigate) {
-					if (msg?.graph) {
-						this.graph = msg.graph as CircuitGraph;
+				const openNodeById = async (nodeId: string): Promise<void> => {
+					if (!this.onNavigate) {
+						return;
 					}
-					await this.onNavigate(msg.node as CircuitNode, this.graph);
+					const node = this.graph.nodes.find((item) => item.id === nodeId);
+					if (!node) {
+						if (this.lastUnresolvedNodeId !== nodeId) {
+							this.lastUnresolvedNodeId = nodeId;
+							vscode.window.showInformationMessage('Node details are unavailable for this selection right now.');
+						}
+						return;
+					}
+					this.lastUnresolvedNodeId = undefined;
+					await this.onNavigate(node, this.graph);
+				};
+				if (msg?.type === 'navigate' && typeof msg?.nodeId === 'string') {
+					await openNodeById(msg.nodeId);
 					return;
 				}
 				if (msg?.type === 'openSkeleton' && typeof msg?.nodeId === 'string') {
@@ -95,11 +108,8 @@ export class CircuitPanel {
 					}
 					return;
 				}
-				if (msg?.type === 'viewNode' && typeof msg?.nodeId === 'string' && this.onNavigate) {
-					const node = this.graph.nodes.find((item) => item.id === msg.nodeId);
-					if (node) {
-						await this.onNavigate(node, this.graph);
-					}
+				if (msg?.type === 'viewNode' && typeof msg?.nodeId === 'string') {
+					await openNodeById(msg.nodeId);
 					return;
 				}
 				if (msg?.type === 'updateGraph' && msg?.graph) {
@@ -518,13 +528,13 @@ export class CircuitPanel {
   <div id="hud">
     <div id="hudControls">
       <button id="viewLockBtn" class="hud-control-btn" title="Lock view" aria-label="Lock view">
-        <span class="hud-control-btn-icon">🔓</span>
+        <span class="hud-control-btn-icon">&#128275;</span>
       </button>
       <button id="hudMinBtn" class="hud-control-btn" title="Minimize HUD" aria-label="Minimize HUD">
-        <span class="hud-control-btn-icon">−</span>
+        <span class="hud-control-btn-icon">&#8722;</span>
       </button>
       <button id="hudMaxBtn" class="hud-control-btn" title="Maximize HUD" aria-label="Maximize HUD">
-        <span class="hud-control-btn-icon">▢</span>
+        <span class="hud-control-btn-icon">&#9634;</span>
       </button>
     </div>
     <div class="card hud-main-card">
@@ -806,7 +816,7 @@ export class CircuitPanel {
 
     function fitLabel(text, maxChars) {
       if (!text || text.length <= maxChars) return text;
-      return text.slice(0, Math.max(0, maxChars - 1)) + '…';
+      return text.slice(0, Math.max(0, maxChars - 1)) + '...';
     }
 
     function makeLabelSprite(text, colorHex) {
@@ -2050,7 +2060,9 @@ export class CircuitPanel {
         hudMinBtn.setAttribute('aria-label', hudMinimized ? 'Restore HUD' : 'Minimize HUD');
         const minIcon = hudMinBtn.querySelector('.hud-control-btn-icon');
         if (minIcon) {
-          minIcon.textContent = hudMinimized ? '▣' : '−';
+          minIcon.textContent = hudMinimized
+            ? String.fromCodePoint(0x25A3)
+            : String.fromCodePoint(0x2212);
         }
       }
       if (hudMaxBtn) {
@@ -2059,7 +2071,9 @@ export class CircuitPanel {
         hudMaxBtn.setAttribute('aria-label', hudMaximized ? 'Normalize HUD' : 'Maximize HUD');
         const maxIcon = hudMaxBtn.querySelector('.hud-control-btn-icon');
         if (maxIcon) {
-          maxIcon.textContent = hudMaximized ? '❐' : '▢';
+          maxIcon.textContent = hudMaximized
+            ? String.fromCodePoint(0x2750)
+            : String.fromCodePoint(0x25A2);
         }
         hudMaxBtn.disabled = hudMinimized;
       }
@@ -2069,7 +2083,9 @@ export class CircuitPanel {
         viewLockBtn.setAttribute('aria-label', viewLocked ? 'Unlock view' : 'Lock view');
         const lockIcon = viewLockBtn.querySelector('.hud-control-btn-icon');
         if (lockIcon) {
-          lockIcon.textContent = viewLocked ? '🔒' : '🔓';
+          lockIcon.textContent = viewLocked
+            ? String.fromCodePoint(0x1f512)
+            : String.fromCodePoint(0x1f513);
         }
       }
       persistUiState();
@@ -2480,7 +2496,7 @@ export class CircuitPanel {
             setDetails(node);
           }
           if (node && vscode && (node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility')) {
-            vscode.postMessage({ type: 'navigate', node: node, graph });
+            vscode.postMessage({ type: 'navigate', nodeId: node.id });
           }
 
           // CodeFlow behavior: clicking current step advances focus to next step.
@@ -2492,7 +2508,7 @@ export class CircuitPanel {
               if (nextNode) {
                 setDetails(nextNode);
                 if (vscode) {
-                  vscode.postMessage({ type: 'navigate', node: nextNode, graph });
+                  vscode.postMessage({ type: 'navigate', nodeId: nextNode.id });
                 }
               }
             }
@@ -2943,3 +2959,4 @@ function getNonce(): string {
 	}
 	return text;
 }
+
