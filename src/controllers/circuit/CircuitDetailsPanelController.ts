@@ -524,12 +524,45 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
     .meta { color: var(--muted); font-size:12px; margin-bottom: 12px; }
     pre { background: var(--code); border:1px solid var(--border); border-radius:10px; padding:12px; overflow:auto; max-height: 260px; }
     code { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+    .copy-wrap { position: relative; }
+    .copy-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      background: #0b1225;
+      color: #e2e8f0;
+      font-size: 13px;
+      font-weight: 700;
+      width: 28px;
+      height: 24px;
+      padding: 0;
+      cursor: pointer;
+      z-index: 2;
+    }
+    .copy-btn:hover { border-color: #64748b; background: #0f172a; }
     .chat-wrap { margin-top: 14px; border:1px solid var(--border); border-radius: 10px; background: color-mix(in oklab, var(--panel) 96%, black); }
     .chat-head { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); }
     .chat-log { padding: 10px; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
     .chat-bubble { border-radius: 10px; padding: 8px 10px; border:1px solid var(--border); }
     .chat-bubble.user { align-self: flex-end; background: rgba(34,197,94,0.17); max-width: 86%; }
     .chat-bubble.assistant { align-self: flex-start; background: rgba(59,130,246,0.13); max-width: 92%; }
+    .assistant-toolbar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+    .copy-msg-btn {
+      border: 1px solid #334155;
+      border-radius: 6px;
+      background: #0b1225;
+      color: #e2e8f0;
+      font-size: 13px;
+      font-weight: 700;
+      width: 28px;
+      height: 22px;
+      padding: 0;
+      cursor: pointer;
+      align-self: auto;
+    }
+    .copy-msg-btn:hover { border-color: #64748b; background: #0f172a; }
     .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
     .msg-user { white-space: pre-wrap; line-height: 1.45; font-size: 13px; }
     .msg-markdown { line-height: 1.52; font-size: 13px; }
@@ -570,20 +603,23 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
     .chat-empty { color: var(--muted); font-size: 12px; }
     .ask-row { display: flex; gap: 8px; padding: 10px; border-top:1px solid var(--border); }
     textarea { flex:1; resize: vertical; min-height: 56px; max-height: 120px; border-radius: 8px; border:1px solid var(--border); background: #0b1225; color: var(--text); padding: 8px; font-family: Segoe UI, Tahoma, sans-serif; font-size: 13px; }
-    button { border:none; border-radius: 8px; padding: 10px 12px; background: #16a34a; color: #fff; font-weight: 600; cursor: pointer; align-self: flex-end; }
-    button:disabled { background: #334155; cursor: default; }
+    .ask-btn { border:none; border-radius: 8px; padding: 10px 12px; background: #16a34a; color: #fff; font-weight: 600; cursor: pointer; align-self: flex-end; }
+    .ask-btn:disabled { background: #334155; cursor: default; }
   </style>
 </head>
 <body>
   <h1>${esc(title)}</h1>
   <div class="meta">${esc(meta)}</div>
-  <pre><code>${esc(snippet || '(no snippet available)')}</code></pre>
+  <div class="copy-wrap">
+    <button class="copy-btn" id="copySnippetBtn" type="button" title="Copy snippet" aria-label="Copy snippet">⧉</button>
+    <pre id="nodeSnippet"><code>${esc(snippet || '(no snippet available)')}</code></pre>
+  </div>
   <div class="chat-wrap">
     <div class="chat-head">Node Chat (uses selected model from Mushroom PCE)</div>
     <div id="chatLog" class="chat-log">${chatHtml}</div>
     <div class="ask-row">
       <textarea id="question" placeholder="Ask about this node's logic, bugs, edge cases, improvements..." ${asking ? 'disabled' : ''}></textarea>
-      <button id="askBtn" ${asking ? 'disabled' : ''}>${asking ? 'Thinking...' : 'Ask'}</button>
+      <button id="askBtn" class="ask-btn" ${asking ? 'disabled' : ''}>${asking ? 'Thinking...' : 'Ask'}</button>
     </div>
   </div>
   <script nonce="${nonce}">
@@ -591,6 +627,90 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
     const askBtn = document.getElementById('askBtn');
     const question = document.getElementById('question');
     const chatLog = document.getElementById('chatLog');
+    const copySnippetBtn = document.getElementById('copySnippetBtn');
+    const nodeSnippet = document.getElementById('nodeSnippet');
+
+    const copyText = async (text) => {
+      const value = String(text || '');
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(value);
+          return true;
+        }
+      } catch (_) {}
+      try {
+        const area = document.createElement('textarea');
+        area.value = value;
+        area.style.position = 'fixed';
+        area.style.left = '-9999px';
+        document.body.appendChild(area);
+        area.focus();
+        area.select();
+        const ok = document.execCommand('copy');
+        area.remove();
+        return !!ok;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    const flashButton = (btn, okLabel = '✓') => {
+      if (!btn) return;
+      const prev = btn.textContent;
+      btn.textContent = okLabel;
+      setTimeout(() => {
+        btn.textContent = prev;
+      }, 1000);
+    };
+
+    copySnippetBtn?.addEventListener('click', async () => {
+      const text = nodeSnippet?.innerText || '';
+      const ok = await copyText(text);
+      flashButton(copySnippetBtn, ok ? '✓' : '!');
+    });
+
+    const attachAssistantCopyButtons = () => {
+      document.querySelectorAll('.chat-bubble.assistant').forEach((bubble) => {
+        if (bubble.querySelector('.assistant-toolbar')) return;
+        const toolbar = document.createElement('div');
+        toolbar.className = 'assistant-toolbar';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'copy-msg-btn';
+        btn.textContent = '⧉';
+        btn.title = 'Copy answer';
+        btn.setAttribute('aria-label', 'Copy answer');
+        btn.addEventListener('click', async () => {
+          const text = bubble.querySelector('.msg-markdown')?.innerText || bubble.innerText || '';
+          const ok = await copyText(text);
+          flashButton(btn, ok ? '✓' : '!');
+        });
+        toolbar.appendChild(btn);
+        bubble.insertBefore(toolbar, bubble.firstChild);
+      });
+    };
+
+    const attachCodeBlockCopyButtons = () => {
+      document.querySelectorAll('.msg-markdown pre').forEach((pre) => {
+        if (pre.parentElement?.classList.contains('copy-wrap')) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'copy-wrap';
+        pre.parentNode?.insertBefore(wrap, pre);
+        wrap.appendChild(pre);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'copy-btn';
+        btn.textContent = '⧉';
+        btn.title = 'Copy code';
+        btn.setAttribute('aria-label', 'Copy code');
+        btn.addEventListener('click', async () => {
+          const text = pre.querySelector('code')?.innerText || pre.innerText || '';
+          const ok = await copyText(text);
+          flashButton(btn, ok ? '✓' : '!');
+        });
+        wrap.appendChild(btn);
+      });
+    };
     const submit = () => {
       const text = String(question.value || '').trim();
       if (!text) return;
@@ -606,6 +726,8 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
     if (chatLog) {
       chatLog.scrollTop = chatLog.scrollHeight;
     }
+    attachAssistantCopyButtons();
+    attachCodeBlockCopyButtons();
   </script>
 </body>
 </html>`;
