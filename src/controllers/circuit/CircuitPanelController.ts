@@ -279,8 +279,15 @@ export class CircuitPanel {
     html, body { height: 100%; }
     body { margin: 0; overflow: hidden; background: #070b18; color: #e2e8f0; font-family: Segoe UI, Tahoma, sans-serif; }
     #hud {
-      position: absolute; top: 12px; left: 12px; right: 12px;
-      display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; pointer-events: none;
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 8px;
+      pointer-events: none;
     }
     #hudControls {
       position: absolute;
@@ -288,23 +295,24 @@ export class CircuitPanel {
       right: 0;
       pointer-events: auto;
       display: flex;
-      gap: 4px;
+      gap: 3px;
       align-items: center;
       z-index: 20;
-      background: rgba(11, 18, 37, 0.86);
-      border: 1px solid rgba(33, 48, 77, 0.95);
-      border-radius: 10px;
-      padding: 3px;
-      backdrop-filter: blur(8px);
+      background: rgba(10, 18, 37, 0.9);
+      border: 1px solid rgba(58, 84, 130, 0.78);
+      border-radius: 9px;
+      padding: 2px;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.24);
+      backdrop-filter: blur(10px);
     }
     .hud-control-btn {
-      width: 30px;
-      height: 26px;
-      border: 1px solid transparent;
-      background: transparent;
-      color: #dbeafe;
-      border-radius: 7px;
-      font-size: 13px;
+      width: 27px;
+      height: 24px;
+      border: 1px solid rgba(90, 117, 162, 0.08);
+      background: rgba(15, 27, 52, 0.35);
+      color: #e5efff;
+      border-radius: 6px;
+      font-size: 12px;
       font-weight: 700;
       line-height: 1;
       cursor: pointer;
@@ -312,21 +320,22 @@ export class CircuitPanel {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease, color 120ms ease;
     }
     .hud-control-btn:hover {
-      background: rgba(59, 130, 246, 0.2);
-      border-color: rgba(147, 197, 253, 0.45);
+      background: rgba(59, 130, 246, 0.28);
+      border-color: rgba(156, 199, 255, 0.62);
       transform: translateY(-0.5px);
     }
     .hud-control-btn.active {
-      border-color: rgba(34, 197, 94, 0.9);
-      background: rgba(22, 163, 74, 0.26);
+      border-color: rgba(34, 197, 94, 0.95);
+      background: rgba(22, 163, 74, 0.3);
       color: #dcfce7;
     }
     .hud-control-btn:disabled {
-      opacity: 0.5;
+      opacity: 0.42;
       cursor: default;
+      color: #90a3c3;
       transform: none;
     }
     .hud-control-btn-icon {
@@ -338,11 +347,11 @@ export class CircuitPanel {
       display: none;
     }
     body.hud-maximized #hud .card {
-      max-width: 500px;
-      padding: 10px 12px;
+      max-width: 470px;
+      padding: 9px 10px;
     }
     body.hud-maximized #hud .hud-selection-card {
-      max-width: 420px;
+      max-width: 390px;
     }
     body.hud-minimized #hudControls {
       right: auto;
@@ -350,46 +359,57 @@ export class CircuitPanel {
     }
     .card {
       pointer-events: auto;
-      background: linear-gradient(180deg, rgba(14, 25, 52, 0.86), rgba(11, 18, 37, 0.9));
-      border: 1px solid rgba(44, 72, 118, 0.86);
-      border-radius: 12px;
-      padding: 10px 12px;
+      background: linear-gradient(180deg, rgba(14, 24, 49, 0.86), rgba(10, 17, 35, 0.91));
+      border: 1px solid rgba(60, 90, 136, 0.8);
+      border-radius: 11px;
+      padding: 8px 10px;
       backdrop-filter: blur(10px);
-      max-width: 420px;
-      max-height: calc(100vh - 24px);
+      max-width: 388px;
+      max-height: calc(100vh - 20px);
       overflow-y: auto;
       overflow-x: hidden;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.29);
     }
     .hud-main-card {
-      width: clamp(300px, 30vw, 420px);
+      width: clamp(280px, 28vw, 388px);
     }
     .hud-selection-card {
-      width: clamp(250px, 24vw, 340px);
+      width: clamp(230px, 22vw, 320px);
     }
-    .title { font-weight: 700; margin-bottom: 6px; letter-spacing: 0.01em; }
-    .muted { color: #9fb0cc; font-size: 12px; }
+    .title {
+      font-weight: 700;
+      margin-bottom: 4px;
+      letter-spacing: 0.01em;
+      font-size: 12px;
+      color: #eaf2ff;
+    }
+    .muted {
+      color: #aec0de;
+      font-size: 11px;
+      line-height: 1.35;
+    }
     .mode-row { display: flex; gap: 8px; margin-top: 6px; pointer-events: auto; }
     .hud-sections {
-      margin-top: 8px;
+      margin-top: 7px;
       display: grid;
-      gap: 8px;
+      gap: 7px;
       pointer-events: auto;
     }
     .hud-section {
-      border: 1px solid rgba(40, 66, 106, 0.9);
-      background: rgba(7, 16, 36, 0.78);
-      border-radius: 10px;
+      border: 1px solid rgba(56, 85, 128, 0.74);
+      background: rgba(8, 16, 35, 0.82);
+      border-radius: 9px;
       overflow: hidden;
     }
     .hud-section-title {
       font-size: 10px;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
-      color: #9fb0cc;
-      padding: 6px 9px;
-      border-bottom: 1px solid rgba(40, 66, 106, 0.88);
-      background: rgba(12, 22, 44, 0.72);
+      font-weight: 700;
+      color: #b8cae7;
+      padding: 5px 8px;
+      border-bottom: 1px solid rgba(56, 85, 128, 0.7);
+      background: rgba(13, 24, 46, 0.78);
     }
     .hud-option-grid {
       display: grid;
@@ -401,54 +421,54 @@ export class CircuitPanel {
     }
     .mode-btn {
       border: none;
-      border-right: 1px solid rgba(40, 66, 106, 0.9);
-      border-bottom: 1px solid rgba(40, 66, 106, 0.9);
-      background: rgba(12, 22, 44, 0.66);
-      color: #d4deed;
+      border-right: 1px solid rgba(56, 85, 128, 0.75);
+      border-bottom: 1px solid rgba(56, 85, 128, 0.75);
+      background: rgba(12, 22, 44, 0.74);
+      color: #dce7f8;
       border-radius: 0;
       font-size: 11px;
       font-weight: 600;
-      padding: 8px 9px;
+      padding: 7px 8px;
       cursor: pointer;
-      min-height: 30px;
+      min-height: 28px;
       text-align: center;
       white-space: normal;
       line-height: 1.2;
       word-break: keep-all;
-      transition: background 120ms ease, color 120ms ease;
+      transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
     }
     .mode-btn:hover,
     .mini-btn:hover {
-      background: rgba(34, 60, 101, 0.9);
-      color: #f1f5f9;
+      background: rgba(37, 66, 108, 0.95);
+      color: #f5f8ff;
     }
     .hud-option-grid .mode-btn:nth-child(3n) { border-right: none; }
     .hud-option-grid.two-col .mode-btn:nth-child(2n) { border-right: none; }
     .hud-option-grid .mode-btn:nth-last-child(-n + 3) { border-bottom: none; }
     .hud-option-grid.two-col .mode-btn:nth-last-child(-n + 2) { border-bottom: none; }
     .mode-btn.active {
-      background: linear-gradient(180deg, rgba(22, 163, 74, 0.38), rgba(22, 163, 74, 0.18));
+      background: linear-gradient(180deg, rgba(22, 163, 74, 0.44), rgba(22, 163, 74, 0.22));
       color: #dcfce7;
       box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.75);
     }
     .mini-btn {
       border: none;
-      border-right: 1px solid rgba(40, 66, 106, 0.9);
-      border-bottom: 1px solid rgba(40, 66, 106, 0.9);
-      background: rgba(12, 22, 44, 0.66);
-      color: #d4deed;
+      border-right: 1px solid rgba(56, 85, 128, 0.75);
+      border-bottom: 1px solid rgba(56, 85, 128, 0.75);
+      background: rgba(12, 22, 44, 0.74);
+      color: #dce7f8;
       border-radius: 0;
       font-size: 11px;
       font-weight: 600;
-      padding: 8px 9px;
+      padding: 7px 8px;
       cursor: pointer;
       pointer-events: auto;
-      min-height: 30px;
+      min-height: 28px;
       text-align: center;
       white-space: normal;
       line-height: 1.2;
       word-break: keep-all;
-      transition: background 120ms ease, color 120ms ease;
+      transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
     }
     .scope-section .hud-option-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -457,16 +477,16 @@ export class CircuitPanel {
       grid-column: 1 / -1;
     }
     .mini-btn.active {
-      background: linear-gradient(180deg, rgba(22, 163, 74, 0.38), rgba(22, 163, 74, 0.18));
+      background: linear-gradient(180deg, rgba(22, 163, 74, 0.44), rgba(22, 163, 74, 0.22));
       color: #dcfce7;
       box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.75);
     }
     .mini-btn:disabled {
-      opacity: 0.45;
+      opacity: 0.4;
       cursor: default;
     }
     #selectionActions {
-      margin-top: 8px;
+      margin-top: 7px;
       pointer-events: auto;
     }
     #includeExternalBtn {
@@ -476,14 +496,34 @@ export class CircuitPanel {
       display: none;
     }
     #modeHint {
-      margin-top: 8px;
-      color: #9fb0cc;
+      margin-top: 7px;
+      color: #a9bcda;
       font-size: 10px;
-      border: 1px solid rgba(40, 66, 106, 0.72);
-      background: rgba(12, 22, 44, 0.45);
-      border-radius: 9px;
-      padding: 7px 9px;
+      border: 1px solid rgba(56, 85, 128, 0.62);
+      background: rgba(12, 22, 44, 0.52);
+      border-radius: 8px;
+      padding: 6px 8px;
       line-height: 1.45;
+    }
+    @media (max-width: 1120px) {
+      #hud {
+        top: 8px;
+        left: 8px;
+        right: 8px;
+        gap: 6px;
+      }
+      .card {
+        max-width: 350px;
+      }
+      .hud-main-card {
+        width: clamp(250px, 40vw, 350px);
+      }
+      .hud-selection-card {
+        width: clamp(220px, 34vw, 290px);
+      }
+      .hud-section-title {
+        padding: 4px 7px;
+      }
     }
     #aiInsights {
       margin-top: 8px;
