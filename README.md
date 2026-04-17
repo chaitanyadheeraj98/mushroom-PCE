@@ -1,71 +1,76 @@
-# mushroom-pce README
+# Mushroom PCE
 
-This is the README for your extension "mushroom-pce". After writing up a brief description, we recommend including the following sections.
+Mushroom PCE helps you understand code faster inside VS Code with:
+- AI file explanations (Developer Mode)
+- Deterministic code inventory output (List Mode)
+- Interactive circuit-style graphs for architecture, runtime flow, and file dependencies
+- Node-level Q&A with connected context (Context Bot)
 
-## Features
+![Mushroom PCE Circuit Mode](images/feature-circuit.png)
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+## What It Does
 
-For example if there is an image subfolder under your extension project workspace:
+### File Analysis Panel
+- Starts from the active editor file
+- Streams an AI explanation in **Developer Mode**
+- Or generates a structured static inventory in **List Mode** (no AI call)
+- Converts detected symbols into clickable links so you can jump to definitions
+- Warns when the file language mode appears mismatched with the code (for better analysis quality)
 
-\!\[feature X\]\(images/feature-x.png\)
+### Circuit Mode
+- **Current File**: hybrid graph built from static analysis + call hierarchy enrichment
+- **Full Architecture**: 1-hop file dependency map centered on the current file
+  - `imports` mode: import/export relationships
+  - `imports-calls` mode: import/export + call-hierarchy neighbors
+- **CodeFlow**: ordered runtime-style flow blocks for top-level statements and declarations
+- **Skeleton**: isolate a node and its one-hop neighborhood for focused exploration
+- **Node Details**: inspect code snippets per node and ask node-scoped questions
+- **Context Bot**: connect selected runtime outputs into a context node and ask targeted questions
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+## Commands
+
+- `Mushroom PCE: Start Mushroom PCE` (`mushroom-pce.start`)
+- `Mushroom PCE: Analyze Active File` (`mushroom-pce.analyzeActive`)
+- `Mushroom PCE: Select Model` (`mushroom-pce.selectModel`)
+- `Mushroom PCE: Set List Mode` (`mushroom-pce.setListMode`)
+- `Mushroom PCE: Set Developer Mode` (`mushroom-pce.setDeveloperMode`)
+- `Mushroom PCE: Open Circuit Mode` (`mushroom-pce.openCircuit`)
+- `Mushroom PCE: Go To Function` (`mushroom-pce.goToFunction`) (used internally by clickable symbol links)
 
 ## Requirements
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+- VS Code `^1.110.0`
+- Access to at least one VS Code chat/language model (for Developer Mode and node chat)
+- Node.js 18+ (development only)
 
-## Extension Settings
+## Current Extension Settings
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+This version does **not** contribute user settings in `package.json`.
+Mode/model selection is handled through commands and panel controls.
 
-For example:
+## Known Limitations
 
-This extension contributes the following settings:
+- Very large workspaces can take longer to build in Circuit Mode.
+- Graph accuracy depends on available symbol/call-hierarchy providers for the current language.
+- Some relationships are heuristic/fallback-labeled (for example `[fallback-medium]`) when high-confidence API data is unavailable.
+- Full Architecture currently focuses on 1-hop neighbors from the active file.
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+## Development
 
-## Known Issues
+```bash
+npm install
+npm run compile
+```
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+Useful scripts:
+- `npm run watch`
+- `npm run lint`
+- `npm run test`
 
-## Release Notes
+## Why Use It
 
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+Mushroom PCE is designed for onboarding, debugging, and safe refactoring:
+- Understand unfamiliar code paths quickly
+- Visualize what calls what (and how files connect)
+- Ask focused questions at node level with connected context
+- Move from high-level architecture to concrete code lines in one workflow
