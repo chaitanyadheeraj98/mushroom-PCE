@@ -8,6 +8,7 @@ import { CircuitPanel } from '../controllers/circuit/CircuitPanelController';
 import { buildGlobalSkeletonGraph } from '../services/circuit/buildSkeletonGraph';
 import { MushroomPanel } from '../controllers/mushroom/MushroomPanelController';
 import { ResponseMode } from '../shared/types/appTypes';
+import { CircuitAiEnrichmentResult, CircuitGraph } from '../shared/types/circuitTypes';
 
 type RegisterCommandsDeps = {
 	extensionUri: vscode.Uri;
@@ -27,6 +28,8 @@ type RegisterCommandsDeps = {
 	tryRestoreCachedAnalysis: (panel: MushroomPanel) => Promise<boolean>;
 	runAnalysis: (panel: MushroomPanel) => Promise<void>;
 	askNodeQuestion: (request: NodeChatRequest) => Promise<string>;
+	requestCircuitAiEnrichment: (graph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>;
+	requestCircuitRelationExplain: (graph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>;
 };
 
 export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposable[] {
@@ -184,6 +187,12 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 					return undefined;
 				}
 				return buildCircuitGraphHybrid(currentDoc);
+			},
+			async (currentGraph) => {
+				return deps.requestCircuitAiEnrichment(currentGraph);
+			},
+			async (currentGraph, fromNodeId, toNodeId) => {
+				return deps.requestCircuitRelationExplain(currentGraph, fromNodeId, toNodeId);
 			}
 		);
 	});

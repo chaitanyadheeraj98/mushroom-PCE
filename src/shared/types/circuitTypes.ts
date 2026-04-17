@@ -50,3 +50,32 @@ export type CircuitGraph = {
 	nodes: CircuitNode[];
 	edges: CircuitEdge[];
 };
+
+export type CircuitAiNodeSummary = {
+	nodeId: string;
+	summary: string;
+	confidence: number;
+};
+
+export type CircuitAiInsight = {
+	title: string;
+	detail: string;
+	confidence: number;
+};
+
+export type CircuitAiSuggestedEdge = {
+	from: string;
+	to: string;
+	kind: 'runtime' | 'architecture';
+	label: string;
+	confidence: number;
+	reason: string;
+};
+
+export type CircuitAiEnrichmentResult = {
+	nodeSummaries: CircuitAiNodeSummary[];
+	insights: CircuitAiInsight[];
+	suggestedEdges: CircuitAiSuggestedEdge[];
+	modelLabel?: string;
+	generatedAt: number;
+};

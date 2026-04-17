@@ -1,7 +1,7 @@
 ﻿import * as vscode from 'vscode';
 
 import { CircuitDetailsPanel } from './CircuitDetailsPanelController';
-import { CircuitGraph, CircuitNode } from '../../shared/types/circuitTypes';
+import { CircuitAiEnrichmentResult, CircuitGraph, CircuitNode } from '../../shared/types/circuitTypes';
 
 export class CircuitPanel {
 	private static currentPanel: CircuitPanel | undefined;
@@ -15,6 +15,12 @@ export class CircuitPanel {
 		currentGraph: CircuitGraph,
 		options?: { dependencyMode?: 'imports' | 'imports-calls' }
 	) => Promise<CircuitGraph | undefined>;
+	private readonly onRequestAiEnrichment?: (currentGraph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>;
+	private readonly onRequestAiRelationExplain?: (
+		currentGraph: CircuitGraph,
+		fromNodeId: string,
+		toNodeId: string
+	) => Promise<string | undefined>;
 	private graph: CircuitGraph;
 	private readonly isPrimaryPanel: boolean;
 	private lastUnresolvedNodeId?: string;
@@ -28,7 +34,9 @@ export class CircuitPanel {
 			scope: 'current-file' | 'full-architecture' | 'codeflow',
 			currentGraph: CircuitGraph,
 			options?: { dependencyMode?: 'imports' | 'imports-calls' }
-		) => Promise<CircuitGraph | undefined>
+		) => Promise<CircuitGraph | undefined>,
+		onRequestAiEnrichment?: (currentGraph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>,
+		onRequestAiRelationExplain?: (currentGraph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>
 	): CircuitPanel {
 		if (CircuitPanel.currentPanel) {
 			CircuitPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
@@ -43,9 +51,19 @@ export class CircuitPanel {
 			localResourceRoots: [extensionUri, vscode.Uri.joinPath(extensionUri, 'node_modules')]
 		});
 
-		CircuitPanel.currentPanel = new CircuitPanel(panel, extensionUri, graph, onNavigate, onBuildSkeletonGraph, onRequestGraph, {
+		CircuitPanel.currentPanel = new CircuitPanel(
+			panel,
+			extensionUri,
+			graph,
+			onNavigate,
+			onBuildSkeletonGraph,
+			onRequestGraph,
+			onRequestAiEnrichment,
+			onRequestAiRelationExplain,
+			{
 			isPrimaryPanel: true
-		});
+			}
+		);
 		return CircuitPanel.currentPanel;
 	}
 
@@ -60,6 +78,8 @@ export class CircuitPanel {
 			currentGraph: CircuitGraph,
 			options?: { dependencyMode?: 'imports' | 'imports-calls' }
 		) => Promise<CircuitGraph | undefined>,
+		onRequestAiEnrichment?: (currentGraph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>,
+		onRequestAiRelationExplain?: (currentGraph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>,
 		options?: { initialSkeletonRootNodeId?: string; initialViewMode?: 'architecture' | 'runtime'; isPrimaryPanel?: boolean }
 	) {
 		this.panel = panel;
@@ -68,6 +88,8 @@ export class CircuitPanel {
 		this.onNavigate = onNavigate;
 		this.onBuildSkeletonGraph = onBuildSkeletonGraph;
 		this.onRequestGraph = onRequestGraph;
+		this.onRequestAiEnrichment = onRequestAiEnrichment;
+		this.onRequestAiRelationExplain = onRequestAiRelationExplain;
 		this.isPrimaryPanel = options?.isPrimaryPanel ?? false;
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 		this.panel.webview.onDidReceiveMessage(
@@ -114,6 +136,42 @@ export class CircuitPanel {
 				}
 				if (msg?.type === 'updateGraph' && msg?.graph) {
 					this.setGraph(msg.graph as CircuitGraph);
+					return;
+				}
+				if (msg?.type === 'requestAiEnrichment' && this.onRequestAiEnrichment) {
+					try {
+						const result = await this.onRequestAiEnrichment(this.graph);
+						this.panel.webview.postMessage({ type: 'aiEnrichment', result });
+					} catch (error: any) {
+						this.panel.webview.postMessage({
+							type: 'aiEnrichment',
+							error: error?.message ?? String(error ?? 'AI enrichment failed')
+						});
+					}
+					return;
+				}
+				if (
+					msg?.type === 'requestAiRelationExplain' &&
+					this.onRequestAiRelationExplain &&
+					typeof msg?.fromNodeId === 'string' &&
+					typeof msg?.toNodeId === 'string'
+				) {
+					try {
+						const text = await this.onRequestAiRelationExplain(this.graph, msg.fromNodeId, msg.toNodeId);
+						this.panel.webview.postMessage({
+							type: 'aiRelationExplain',
+							fromNodeId: msg.fromNodeId,
+							toNodeId: msg.toNodeId,
+							text
+						});
+					} catch (error: any) {
+						this.panel.webview.postMessage({
+							type: 'aiRelationExplain',
+							fromNodeId: msg.fromNodeId,
+							toNodeId: msg.toNodeId,
+							error: error?.message ?? String(error ?? 'Relation explain failed')
+						});
+					}
 				}
 			},
 			null,
@@ -170,6 +228,8 @@ export class CircuitPanel {
 			this.onNavigate,
 			this.onBuildSkeletonGraph,
 			this.onRequestGraph,
+			this.onRequestAiEnrichment,
+			this.onRequestAiRelationExplain,
 			{
 			initialSkeletonRootNodeId: rootNodeId,
 			initialViewMode: 'runtime',
@@ -220,7 +280,7 @@ export class CircuitPanel {
     body { margin: 0; overflow: hidden; background: #070b18; color: #e2e8f0; font-family: Segoe UI, Tahoma, sans-serif; }
     #hud {
       position: absolute; top: 12px; left: 12px; right: 12px;
-      display: flex; justify-content: space-between; gap: 12px; pointer-events: none;
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; pointer-events: none;
     }
     #hudControls {
       position: absolute;
@@ -278,42 +338,48 @@ export class CircuitPanel {
       display: none;
     }
     body.hud-maximized #hud .card {
-      max-width: 620px;
-      padding: 12px 14px;
+      max-width: 500px;
+      padding: 10px 12px;
     }
     body.hud-maximized #hud .hud-selection-card {
-      max-width: 760px;
+      max-width: 420px;
     }
     body.hud-minimized #hudControls {
       right: auto;
       left: 0;
     }
     .card {
-      pointer-events: none;
+      pointer-events: auto;
       background: linear-gradient(180deg, rgba(14, 25, 52, 0.86), rgba(11, 18, 37, 0.9));
       border: 1px solid rgba(44, 72, 118, 0.86);
       border-radius: 12px;
-      padding: 12px 14px;
+      padding: 10px 12px;
       backdrop-filter: blur(10px);
-      max-width: 560px;
+      max-width: 420px;
+      max-height: calc(100vh - 24px);
+      overflow-y: auto;
+      overflow-x: hidden;
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     }
     .hud-main-card {
-      width: clamp(360px, 38vw, 560px);
+      width: clamp(300px, 30vw, 420px);
     }
-    .title { font-weight: 700; margin-bottom: 8px; letter-spacing: 0.01em; }
+    .hud-selection-card {
+      width: clamp(250px, 24vw, 340px);
+    }
+    .title { font-weight: 700; margin-bottom: 6px; letter-spacing: 0.01em; }
     .muted { color: #9fb0cc; font-size: 12px; }
-    .mode-row { display: flex; gap: 8px; margin-top: 8px; pointer-events: auto; }
+    .mode-row { display: flex; gap: 8px; margin-top: 6px; pointer-events: auto; }
     .hud-sections {
-      margin-top: 12px;
+      margin-top: 8px;
       display: grid;
-      gap: 10px;
+      gap: 8px;
       pointer-events: auto;
     }
     .hud-section {
       border: 1px solid rgba(40, 66, 106, 0.9);
       background: rgba(7, 16, 36, 0.78);
-      border-radius: 11px;
+      border-radius: 10px;
       overflow: hidden;
     }
     .hud-section-title {
@@ -321,7 +387,7 @@ export class CircuitPanel {
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: #9fb0cc;
-      padding: 7px 10px;
+      padding: 6px 9px;
       border-bottom: 1px solid rgba(40, 66, 106, 0.88);
       background: rgba(12, 22, 44, 0.72);
     }
@@ -340,11 +406,11 @@ export class CircuitPanel {
       background: rgba(12, 22, 44, 0.66);
       color: #d4deed;
       border-radius: 0;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
-      padding: 9px 10px;
+      padding: 8px 9px;
       cursor: pointer;
-      min-height: 34px;
+      min-height: 30px;
       text-align: center;
       white-space: normal;
       line-height: 1.2;
@@ -372,12 +438,12 @@ export class CircuitPanel {
       background: rgba(12, 22, 44, 0.66);
       color: #d4deed;
       border-radius: 0;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
-      padding: 9px 10px;
+      padding: 8px 9px;
       cursor: pointer;
       pointer-events: auto;
-      min-height: 34px;
+      min-height: 30px;
       text-align: center;
       white-space: normal;
       line-height: 1.2;
@@ -410,16 +476,161 @@ export class CircuitPanel {
       display: none;
     }
     #modeHint {
-      margin-top: 10px;
+      margin-top: 8px;
       color: #9fb0cc;
-      font-size: 11px;
+      font-size: 10px;
       border: 1px solid rgba(40, 66, 106, 0.72);
       background: rgba(12, 22, 44, 0.45);
       border-radius: 9px;
-      padding: 8px 10px;
+      padding: 7px 9px;
       line-height: 1.45;
     }
-    #details { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; color: #cbd5e1; }
+    #aiInsights {
+      margin-top: 8px;
+      color: #d6e3f5;
+      font-size: 11px;
+      border: 1px solid rgba(55, 86, 134, 0.72);
+      background: rgba(10, 26, 52, 0.55);
+      border-radius: 9px;
+      padding: 8px 10px;
+      line-height: 1.5;
+      max-height: 220px;
+      overflow: auto;
+      display: none;
+    }
+    #aiInsights .ai-md-block {
+      font-size: 12px;
+      color: #d6e3f5;
+      line-height: 1.55;
+    }
+    #aiInsights .ai-md-sep {
+      border: none;
+      border-top: 1px solid rgba(84, 117, 171, 0.45);
+      margin: 8px 0;
+    }
+    #aiInsights .ai-md-block p {
+      margin: 5px 0;
+    }
+    #aiInsights .ai-md-block ul,
+    #aiInsights .ai-md-block ol {
+      margin: 6px 0 6px 16px;
+      padding: 0;
+    }
+    #aiInsights .ai-md-block li {
+      margin: 3px 0;
+    }
+    #aiInsights .ai-md-block h1,
+    #aiInsights .ai-md-block h2,
+    #aiInsights .ai-md-block h3 {
+      margin: 7px 0 5px;
+      color: #eff6ff;
+      line-height: 1.35;
+    }
+    #aiInsights .ai-md-block h1 { font-size: 14px; }
+    #aiInsights .ai-md-block h2 { font-size: 13px; }
+    #aiInsights .ai-md-block h3 { font-size: 12px; }
+    #aiInsights .ai-md-block code {
+      background: rgba(10, 18, 36, 0.9);
+      border: 1px solid rgba(84, 117, 171, 0.45);
+      border-radius: 5px;
+      padding: 1px 4px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 11px;
+      color: #e2e8f0;
+    }
+    #aiInsights .ai-md-block pre {
+      background: rgba(8, 15, 30, 0.95);
+      border: 1px solid rgba(84, 117, 171, 0.45);
+      border-radius: 6px;
+      padding: 7px;
+      overflow: auto;
+      margin: 6px 0;
+      white-space: pre;
+    }
+    #aiInsights .ai-md-block pre code {
+      border: none;
+      background: transparent;
+      padding: 0;
+    }
+    #aiSuggestions {
+      margin-top: 8px;
+      color: #d6e3f5;
+      font-size: 11px;
+      border: 1px solid rgba(55, 86, 134, 0.72);
+      background: rgba(10, 26, 52, 0.55);
+      border-radius: 9px;
+      padding: 8px 10px;
+      line-height: 1.45;
+      max-height: 150px;
+      overflow: auto;
+      display: none;
+    }
+    .ai-suggestions-title {
+      color: #dbeafe;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .ai-suggestion-row {
+      border: 1px solid rgba(55, 86, 134, 0.6);
+      background: rgba(8, 20, 38, 0.66);
+      border-radius: 8px;
+      padding: 6px 8px;
+      margin-bottom: 6px;
+    }
+    .ai-suggestion-line {
+      color: #d6e3f5;
+      margin-bottom: 5px;
+      white-space: normal;
+    }
+    .ai-suggestion-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .ai-suggestion-btn {
+      border: 1px solid rgba(84, 117, 171, 0.85);
+      background: rgba(15, 32, 62, 0.75);
+      color: #e2e8f0;
+      border-radius: 7px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ai-suggestion-btn:hover {
+      background: rgba(34, 60, 101, 0.9);
+    }
+    .ai-suggestion-btn.reject {
+      border-color: rgba(185, 86, 86, 0.85);
+      background: rgba(56, 23, 23, 0.68);
+    }
+    .ai-suggestion-btn.reject:hover {
+      background: rgba(94, 35, 35, 0.82);
+    }
+    .ai-suggestion-more {
+      color: #a8bbd9;
+      font-size: 11px;
+      margin-top: 2px;
+    }
+    #relationState {
+      margin-top: 8px;
+      color: #c7d7ef;
+      font-size: 11px;
+      border: 1px solid rgba(55, 86, 134, 0.62);
+      background: rgba(8, 20, 38, 0.66);
+      border-radius: 8px;
+      padding: 7px 9px;
+      line-height: 1.45;
+      white-space: normal;
+    }
+    #details {
+      white-space: pre-wrap;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      color: #cbd5e1;
+      max-height: 240px;
+      overflow: auto;
+      padding-right: 2px;
+    }
     #canvas { display: block; width: 100%; height: 100%; }
     #portTip {
       position: absolute;
@@ -576,10 +787,30 @@ export class CircuitPanel {
             <button id="edgeFilterBtn" class="mini-btn">Edges: All</button>
           </div>
         </div>
+        <div class="hud-section">
+          <div class="hud-section-title">AI</div>
+          <div class="hud-option-grid">
+            <button id="aiEnrichBtn" class="mini-btn">AI Insights</button>
+            <button id="aiApplyAllBtn" class="mini-btn">Apply AI</button>
+            <button id="aiRejectAllBtn" class="mini-btn">Reject AI</button>
+          </div>
+        </div>
+        <div class="hud-section">
+          <div class="hud-section-title">Relation Explain</div>
+          <div class="hud-option-grid">
+            <button id="relationSetFromBtn" class="mini-btn">Set From</button>
+            <button id="relationSetToBtn" class="mini-btn">Set To</button>
+            <button id="relationExplainBtn" class="mini-btn">Explain</button>
+            <button id="relationResetBtn" class="mini-btn">Reset</button>
+          </div>
+          <div id="relationState">From: none | To: none</div>
+        </div>
       </div>
       <div id="modeHint">Architecture view: grouped by layers.</div>
+      <div id="aiInsights"></div>
+      <div id="aiSuggestions"></div>
     </div>
-    <div class="card hud-selection-card" style="max-width: 520px;">
+    <div class="card hud-selection-card">
       <div class="title">Selection</div>
       <div id="details" class="muted">None</div>
       <div id="selectionActions" class="mode-row">
@@ -628,9 +859,19 @@ export class CircuitPanel {
     const depImportsBtn = document.getElementById('depImportsBtn');
     const depImportsCallsBtn = document.getElementById('depImportsCallsBtn');
     const edgeFilterBtn = document.getElementById('edgeFilterBtn');
+    const aiEnrichBtn = document.getElementById('aiEnrichBtn');
+    const aiApplyAllBtn = document.getElementById('aiApplyAllBtn');
+    const aiRejectAllBtn = document.getElementById('aiRejectAllBtn');
+    const relationSetFromBtn = document.getElementById('relationSetFromBtn');
+    const relationSetToBtn = document.getElementById('relationSetToBtn');
+    const relationExplainBtn = document.getElementById('relationExplainBtn');
+    const relationResetBtn = document.getElementById('relationResetBtn');
+    const relationStateEl = document.getElementById('relationState');
     const includeExternalBtn = document.getElementById('includeExternalBtn');
     const disconnectContextBtn = document.getElementById('disconnectContextBtn');
     const modeHint = document.getElementById('modeHint');
+    const aiInsightsEl = document.getElementById('aiInsights');
+    const aiSuggestionsEl = document.getElementById('aiSuggestions');
     const viewLockBtn = document.getElementById('viewLockBtn');
     const hudMinBtn = document.getElementById('hudMinBtn');
     const hudMaxBtn = document.getElementById('hudMaxBtn');
@@ -648,6 +889,12 @@ export class CircuitPanel {
     let hudMinimized = false;
     let hudMaximized = false;
     let viewLocked = false;
+    let aiNodeSummaryMap = new Map();
+    let aiLastInsightsText = '';
+    let aiLastRelationExplainText = '';
+    let aiSuggestedEdgesPending = [];
+    let relationFromNodeId = null;
+    let relationToNodeId = null;
 
     try {
       const saved = vscode?.getState?.();
@@ -1018,6 +1265,14 @@ export class CircuitPanel {
 
     function getEdgeTheme(edge) {
       const label = String(edge?.label || '').toLowerCase();
+      if (label.includes('[ai-suggested]')) {
+        return {
+          baseColor: 0xf59e0b,
+          focusColor: 0xfbbf24,
+          baseOpacity: edge.kind === 'architecture' ? 0.68 : 0.6,
+          dashed: true
+        };
+      }
       if (label.includes('imports')) {
         return {
           baseColor: 0xa78bfa,
@@ -1508,6 +1763,30 @@ export class CircuitPanel {
       clearSceneGroups();
       const isArchitectureMode = viewMode === 'architecture';
       const visibleGraph = getVisibleGraph(g);
+      const visibleNodeIdSet = new Set(visibleGraph.nodes.map((node) => node.id));
+      const visibleAiEdges = aiSuggestedEdgesPending
+        .filter((edge) => {
+          if (!visibleNodeIdSet.has(edge.from) || !visibleNodeIdSet.has(edge.to)) {
+            return false;
+          }
+          const isArchitectureEdge = edge.kind === 'architecture';
+          const includeEdge = viewMode === 'architecture' ? isArchitectureEdge : !isArchitectureEdge;
+          if (!includeEdge) {
+            return false;
+          }
+          if (edgeFilterMode === 'api-high') {
+            return false;
+          }
+          return true;
+        })
+        .map((edge) => ({
+          id: makeEdgeId('ai-preview'),
+          kind: edge.kind === 'architecture' ? 'architecture' : 'runtime',
+          from: edge.from,
+          to: edge.to,
+          label: (edge.label || 'suggested') + ' [ai-suggested ' + Math.round((edge.confidence || 0.5) * 100) + '%]'
+        }));
+      const renderEdges = [...visibleGraph.edges, ...visibleAiEdges];
 
       const positions = layoutNodes(visibleGraph.nodes, visibleGraph.edges);
       const laneTotals = new Map();
@@ -1755,12 +2034,14 @@ export class CircuitPanel {
       }
 
       // Create edges (line + arrow + label + particle). Geometry is updated every frame in case nodes move.
-      for (let ei = 0; ei < visibleGraph.edges.length; ei++) {
-        const edge = visibleGraph.edges[ei];
+      for (let ei = 0; ei < renderEdges.length; ei++) {
+        const edge = renderEdges[ei];
         const lineGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
         const edgeTheme = getEdgeTheme(edge);
         const edgeColor = edgeTheme.baseColor;
-        const lineMat = new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: edgeTheme.baseOpacity });
+        const lineMat = edgeTheme.dashed
+          ? new THREE.LineDashedMaterial({ color: edgeColor, transparent: true, opacity: edgeTheme.baseOpacity, dashSize: 16, gapSize: 10 })
+          : new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: edgeTheme.baseOpacity });
         const line = new THREE.Line(lineGeom, lineMat);
         edgeGroup.add(line);
 
@@ -1864,6 +2145,9 @@ export class CircuitPanel {
       e.curve = curve;
       const pts = curve.getPoints(24);
       e.line.geometry.setFromPoints(pts);
+      if (typeof e.line.computeLineDistances === 'function') {
+        e.line.computeLineDistances();
+      }
 
       // Arrowhead at end.
       const t2 = 0.98;
@@ -1918,6 +2202,7 @@ export class CircuitPanel {
       if (!node) {
         details.textContent = 'None';
         updateSelectionActions(undefined, 0);
+        updateRelationUi();
         return;
       }
       const idxs = adjacency.get(node.id) || [];
@@ -1947,6 +2232,7 @@ export class CircuitPanel {
 
       updateSelectionActions(node, hiddenGlobalLines.length);
 
+      const aiSummary = aiNodeSummaryMap.get(node.id);
       details.textContent = [
         'label: ' + node.label,
         'type: ' + node.type,
@@ -1954,10 +2240,12 @@ export class CircuitPanel {
         skeletonRootNodeId ? 'skeleton: active' : null,
         collapseKey ? ('collapsed: ' + (isCollapsed ? 'yes' : 'no')) : null,
         node.detail ? 'detail: ' + node.detail : null,
+        aiSummary ? ('ai: ' + aiSummary) : null,
         typeof node.line === 'number' ? 'line: ' + (node.line + 1) : null,
         visibleLines.length ? ('visible edges:\\n' + visibleLines.join('\\n')) : 'visible edges: none',
         hiddenGlobalLines.length ? ('hidden global edges:\\n' + hiddenGlobalLines.join('\\n')) : 'hidden global edges: none'
       ].filter(Boolean).join('\\n');
+      updateRelationUi();
     }
 
     function includeExternalNeighborsForSelected() {
@@ -2199,11 +2487,359 @@ export class CircuitPanel {
       persistUiState();
     }
 
+    function renderAiInsightsPanel() {
+      if (!aiInsightsEl) {
+        return;
+      }
+      const blocks = [aiLastRelationExplainText, aiLastInsightsText].filter(Boolean);
+      if (!blocks.length) {
+        aiInsightsEl.style.display = 'none';
+        aiInsightsEl.textContent = '';
+        return;
+      }
+      aiInsightsEl.style.display = 'block';
+      aiInsightsEl.innerHTML = blocks
+        .map((block) => '<div class="ai-md-block">' + markdownToMiniHtml(String(block)) + '</div>')
+        .join('<hr class="ai-md-sep" />');
+    }
+
+    function escapeHtmlText(text) {
+      return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function inlineMarkdown(text) {
+      let out = escapeHtmlText(text);
+      out = out.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+      out = out.replace(/\\x60([^\\x60]+)\\x60/g, '<code>$1</code>');
+      return out;
+    }
+
+    function markdownToMiniHtml(markdown) {
+      const lines = String(markdown || '').replace(/\\r\\n/g, '\\n').split('\\n');
+      const out = [];
+      let inCode = false;
+      let listMode = '';
+      const TICK = String.fromCharCode(96);
+      const TRIPLE_TICK = TICK + TICK + TICK;
+      const closeList = () => {
+        if (listMode === 'ul') out.push('</ul>');
+        if (listMode === 'ol') out.push('</ol>');
+        listMode = '';
+      };
+      for (let i = 0; i < lines.length; i++) {
+        const raw = lines[i];
+        const line = raw.trim();
+        if (line.startsWith(TRIPLE_TICK)) {
+          closeList();
+          out.push(inCode ? '</code></pre>' : '<pre><code>');
+          inCode = !inCode;
+          continue;
+        }
+        if (inCode) {
+          out.push(escapeHtmlText(raw) + '\\n');
+          continue;
+        }
+        if (!line) {
+          closeList();
+          continue;
+        }
+        if (line.startsWith('### ')) {
+          closeList();
+          out.push('<h3>' + inlineMarkdown(line.slice(4)) + '</h3>');
+          continue;
+        }
+        if (line.startsWith('## ')) {
+          closeList();
+          out.push('<h2>' + inlineMarkdown(line.slice(3)) + '</h2>');
+          continue;
+        }
+        if (line.startsWith('# ')) {
+          closeList();
+          out.push('<h1>' + inlineMarkdown(line.slice(2)) + '</h1>');
+          continue;
+        }
+        if (/^[-*]\\s+/.test(line)) {
+          if (listMode !== 'ul') {
+            closeList();
+            out.push('<ul>');
+            listMode = 'ul';
+          }
+          out.push('<li>' + inlineMarkdown(line.replace(/^[-*]\\s+/, '')) + '</li>');
+          continue;
+        }
+        if (/^\\d+\\.\\s+/.test(line)) {
+          if (listMode !== 'ol') {
+            closeList();
+            out.push('<ol>');
+            listMode = 'ol';
+          }
+          out.push('<li>' + inlineMarkdown(line.replace(/^\\d+\\.\\s+/, '')) + '</li>');
+          continue;
+        }
+        closeList();
+        out.push('<p>' + inlineMarkdown(line) + '</p>');
+      }
+      closeList();
+      return out.join('') || '<p>No AI output.</p>';
+    }
+
+    function getNodeLabelForRelation(nodeId) {
+      if (!nodeId) {
+        return 'none';
+      }
+      const node = graph.nodes.find((item) => item.id === nodeId);
+      return node ? node.label : nodeId;
+    }
+
+    function updateRelationUi() {
+      if (relationStateEl) {
+        relationStateEl.textContent =
+          'From: ' + getNodeLabelForRelation(relationFromNodeId) +
+          ' | To: ' + getNodeLabelForRelation(relationToNodeId);
+      }
+      if (relationSetFromBtn) {
+        relationSetFromBtn.disabled = !selectedNodeId;
+      }
+      if (relationSetToBtn) {
+        relationSetToBtn.disabled = !selectedNodeId;
+      }
+      if (relationExplainBtn) {
+        relationExplainBtn.disabled =
+          !relationFromNodeId ||
+          !relationToNodeId ||
+          relationFromNodeId === relationToNodeId;
+      }
+      if (relationResetBtn) {
+        relationResetBtn.disabled = !relationFromNodeId && !relationToNodeId;
+      }
+    }
+
+    function aiSuggestionKey(edge) {
+      return String(edge.from) + '->' + String(edge.to) + ':' + String(edge.kind || 'runtime');
+    }
+
+    function mergeAiSuggestions(incoming) {
+      const existingGraphKeys = new Set((graph.edges || []).map((edge) => aiSuggestionKey(edge)));
+      const pendingByKey = new Map(aiSuggestedEdgesPending.map((edge) => [aiSuggestionKey(edge), edge]));
+      for (let i = 0; i < incoming.length; i++) {
+        const edge = incoming[i];
+        if (!edge || !edge.from || !edge.to || edge.from === edge.to) {
+          continue;
+        }
+        const key = aiSuggestionKey(edge);
+        if (existingGraphKeys.has(key)) {
+          continue;
+        }
+        if (!pendingByKey.has(key)) {
+          pendingByKey.set(key, edge);
+        }
+      }
+      aiSuggestedEdgesPending = [...pendingByKey.values()];
+    }
+
+    function renderAiSuggestionQueue() {
+      if (!aiSuggestionsEl) {
+        return;
+      }
+      if (!aiSuggestedEdgesPending.length) {
+        aiSuggestionsEl.style.display = 'none';
+        aiSuggestionsEl.textContent = '';
+        if (aiApplyAllBtn) aiApplyAllBtn.disabled = true;
+        if (aiRejectAllBtn) aiRejectAllBtn.disabled = true;
+        return;
+      }
+      aiSuggestionsEl.style.display = 'block';
+      aiSuggestionsEl.textContent = '';
+
+      const title = document.createElement('div');
+      title.className = 'ai-suggestions-title';
+      title.textContent = 'Pending AI edge suggestions';
+      aiSuggestionsEl.appendChild(title);
+
+      const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+      const maxRows = 12;
+      for (let i = 0; i < Math.min(maxRows, aiSuggestedEdgesPending.length); i++) {
+        const edge = aiSuggestedEdgesPending[i];
+        const edgeKey = aiSuggestionKey(edge);
+        const fromNode = byId.get(edge.from);
+        const toNode = byId.get(edge.to);
+        const conf = typeof edge.confidence === 'number' ? Math.round(edge.confidence * 100) : 50;
+        const row = document.createElement('div');
+        row.className = 'ai-suggestion-row';
+        const line = document.createElement('div');
+        line.className = 'ai-suggestion-line';
+        line.textContent =
+          (i + 1) +
+          '. ' +
+          (fromNode?.label || edge.from) +
+          ' -> ' +
+          (toNode?.label || edge.to) +
+          ' [' + String(edge.kind || 'runtime') + ', ' + conf + '%]' +
+          (edge.reason ? ': ' + edge.reason : '');
+
+        const actions = document.createElement('div');
+        actions.className = 'ai-suggestion-actions';
+        const applyBtn = document.createElement('button');
+        applyBtn.className = 'ai-suggestion-btn';
+        applyBtn.type = 'button';
+        applyBtn.textContent = 'Apply';
+        applyBtn.addEventListener('click', () => applySingleAiSuggestion(edgeKey));
+        const rejectBtn = document.createElement('button');
+        rejectBtn.className = 'ai-suggestion-btn reject';
+        rejectBtn.type = 'button';
+        rejectBtn.textContent = 'Reject';
+        rejectBtn.addEventListener('click', () => rejectSingleAiSuggestion(edgeKey));
+        actions.appendChild(applyBtn);
+        actions.appendChild(rejectBtn);
+        row.appendChild(line);
+        row.appendChild(actions);
+        aiSuggestionsEl.appendChild(row);
+      }
+      if (aiSuggestedEdgesPending.length > maxRows) {
+        const more = document.createElement('div');
+        more.className = 'ai-suggestion-more';
+        more.textContent = '... +' + (aiSuggestedEdgesPending.length - maxRows) + ' more';
+        aiSuggestionsEl.appendChild(more);
+      }
+      if (aiApplyAllBtn) aiApplyAllBtn.disabled = false;
+      if (aiRejectAllBtn) aiRejectAllBtn.disabled = false;
+    }
+
+    function dropPendingAiSuggestionByKey(edgeKey) {
+      const before = aiSuggestedEdgesPending.length;
+      aiSuggestedEdgesPending = aiSuggestedEdgesPending.filter((edge) => aiSuggestionKey(edge) !== edgeKey);
+      return aiSuggestedEdgesPending.length !== before;
+    }
+
+    function applySingleAiSuggestion(edgeKey) {
+      const edge = aiSuggestedEdgesPending.find((item) => aiSuggestionKey(item) === edgeKey);
+      if (!edge) {
+        return;
+      }
+      const exists = graph.edges.some((item) => aiSuggestionKey(item) === edgeKey);
+      if (!exists) {
+        const conf = typeof edge.confidence === 'number' ? Math.round(edge.confidence * 100) : 50;
+        graph.edges.push({
+          id: makeEdgeId('ai'),
+          kind: edge.kind === 'architecture' ? 'architecture' : 'runtime',
+          from: edge.from,
+          to: edge.to,
+          label: (edge.label || 'suggested') + ' [ai-suggested ' + conf + '%]'
+        });
+      }
+      dropPendingAiSuggestionByKey(edgeKey);
+      renderAiSuggestionQueue();
+      buildGraphScene(graph);
+      if (selectedNodeId) {
+        setDetails(nodeMeta.get(selectedNodeId)?.node || null);
+      }
+    }
+
+    function rejectSingleAiSuggestion(edgeKey) {
+      if (!dropPendingAiSuggestionByKey(edgeKey)) {
+        return;
+      }
+      renderAiSuggestionQueue();
+      buildGraphScene(graph);
+      if (selectedNodeId) {
+        setDetails(nodeMeta.get(selectedNodeId)?.node || null);
+      }
+    }
+
+    function applyAiSuggestions() {
+      if (!aiSuggestedEdgesPending.length) {
+        return;
+      }
+      for (let i = 0; i < aiSuggestedEdgesPending.length; i++) {
+        const edge = aiSuggestedEdgesPending[i];
+        const conf = typeof edge.confidence === 'number' ? Math.round(edge.confidence * 100) : 50;
+        graph.edges.push({
+          id: makeEdgeId('ai'),
+          kind: edge.kind === 'architecture' ? 'architecture' : 'runtime',
+          from: edge.from,
+          to: edge.to,
+          label: (edge.label || 'suggested') + ' [ai-suggested ' + conf + '%]'
+        });
+      }
+      aiSuggestedEdgesPending = [];
+      renderAiSuggestionQueue();
+      buildGraphScene(graph);
+      if (selectedNodeId) {
+        setDetails(nodeMeta.get(selectedNodeId)?.node || null);
+      }
+    }
+
+    function rejectAiSuggestions() {
+      aiSuggestedEdgesPending = [];
+      renderAiSuggestionQueue();
+      buildGraphScene(graph);
+      if (selectedNodeId) {
+        setDetails(nodeMeta.get(selectedNodeId)?.node || null);
+      }
+    }
+
     function toggleEdgeFilterMode() {
       edgeFilterMode = edgeFilterMode === 'api-high' ? 'all' : 'api-high';
       updateModeUi();
       buildGraphScene(graph);
       setDetails(selectedNodeId ? (nodeMeta.get(selectedNodeId)?.node || null) : null);
+    }
+
+    function requestAiEnrichment() {
+      if (!vscode || !aiEnrichBtn) {
+        return;
+      }
+      const previous = aiEnrichBtn.textContent;
+      aiEnrichBtn.textContent = 'Thinking...';
+      aiEnrichBtn.disabled = true;
+      vscode.postMessage({ type: 'requestAiEnrichment' });
+      setTimeout(() => {
+        aiEnrichBtn.textContent = previous;
+        aiEnrichBtn.disabled = false;
+      }, 1200);
+    }
+
+    function requestAiRelationExplain(fromNodeId, toNodeId) {
+      if (!vscode || !fromNodeId || !toNodeId || fromNodeId === toNodeId) {
+        return;
+      }
+      aiLastRelationExplainText = 'Analyzing relation...';
+      renderAiInsightsPanel();
+      vscode.postMessage({ type: 'requestAiRelationExplain', fromNodeId, toNodeId });
+    }
+
+    function setRelationFromSelected() {
+      if (!selectedNodeId) {
+        return;
+      }
+      relationFromNodeId = selectedNodeId;
+      updateRelationUi();
+    }
+
+    function setRelationToSelected() {
+      if (!selectedNodeId) {
+        return;
+      }
+      relationToNodeId = selectedNodeId;
+      updateRelationUi();
+    }
+
+    function explainRelationFromState() {
+      if (!relationFromNodeId || !relationToNodeId || relationFromNodeId === relationToNodeId) {
+        return;
+      }
+      requestAiRelationExplain(relationFromNodeId, relationToNodeId);
+    }
+
+    function resetRelationState() {
+      relationFromNodeId = null;
+      relationToNodeId = null;
+      updateRelationUi();
     }
 
     async function requestGraphScope(scope) {
@@ -2617,6 +3253,13 @@ export class CircuitPanel {
       }
     });
     edgeFilterBtn?.addEventListener('click', toggleEdgeFilterMode);
+    aiEnrichBtn?.addEventListener('click', requestAiEnrichment);
+    aiApplyAllBtn?.addEventListener('click', applyAiSuggestions);
+    aiRejectAllBtn?.addEventListener('click', rejectAiSuggestions);
+    relationSetFromBtn?.addEventListener('click', setRelationFromSelected);
+    relationSetToBtn?.addEventListener('click', setRelationToSelected);
+    relationExplainBtn?.addEventListener('click', explainRelationFromState);
+    relationResetBtn?.addEventListener('click', resetRelationState);
     includeExternalBtn?.addEventListener('click', includeExternalNeighborsForSelected);
     disconnectContextBtn?.addEventListener('click', () => {
       if (!selectedNodeId || selectedNodeId === contextBotId) {
@@ -2670,8 +3313,76 @@ export class CircuitPanel {
       const msg = event.data;
       if (msg && msg.type === 'graph') {
         graph = msg.graph;
+        const validIds = new Set(graph.nodes.map((node) => node.id));
+        if (relationFromNodeId && !validIds.has(relationFromNodeId)) {
+          relationFromNodeId = null;
+        }
+        if (relationToNodeId && !validIds.has(relationToNodeId)) {
+          relationToNodeId = null;
+        }
+        aiSuggestedEdgesPending = [];
+        renderAiSuggestionQueue();
+        updateRelationUi();
         updateFabVisibility();
         buildGraphScene(graph);
+        return;
+      }
+      if (msg && msg.type === 'aiEnrichment') {
+        if (msg.error) {
+          aiLastInsightsText = 'AI Insights failed: ' + String(msg.error);
+          renderAiInsightsPanel();
+          return;
+        }
+        const result = msg.result;
+        aiNodeSummaryMap = new Map();
+        const summaries = Array.isArray(result?.nodeSummaries) ? result.nodeSummaries : [];
+        for (let i = 0; i < summaries.length; i++) {
+          const item = summaries[i];
+          if (item && item.nodeId && item.summary) {
+            aiNodeSummaryMap.set(item.nodeId, String(item.summary));
+          }
+        }
+        const insights = Array.isArray(result?.insights) ? result.insights : [];
+        const lines = [];
+        for (let i = 0; i < insights.length; i++) {
+          const insight = insights[i];
+          if (!insight || !insight.title || !insight.detail) {
+            continue;
+          }
+          const conf = typeof insight.confidence === 'number' ? Math.round(insight.confidence * 100) : 50;
+          lines.push('* ' + insight.title + ' (' + conf + '%): ' + insight.detail);
+        }
+        const generatedAt = result?.generatedAt ? new Date(result.generatedAt).toLocaleTimeString() : '';
+        const model = result?.modelLabel ? String(result.modelLabel) : 'selected model';
+        aiLastInsightsText =
+          'AI Insights [' + model + '] ' + (generatedAt ? 'at ' + generatedAt : '') + '\\n' +
+          (lines.length ? lines.join('\\n') : 'No strong insights found.');
+        renderAiInsightsPanel();
+        const suggested = Array.isArray(result?.suggestedEdges) ? result.suggestedEdges : [];
+        mergeAiSuggestions(suggested);
+        renderAiSuggestionQueue();
+        buildGraphScene(graph);
+        if (selectedNodeId) {
+          setDetails(nodeMeta.get(selectedNodeId)?.node || null);
+        }
+        return;
+      }
+      if (msg && msg.type === 'aiRelationExplain') {
+        relationFromNodeId = msg.fromNodeId || relationFromNodeId;
+        relationToNodeId = msg.toNodeId || relationToNodeId;
+        if (msg.error) {
+          aiLastRelationExplainText = 'AI Relation Explain failed: ' + String(msg.error);
+          renderAiInsightsPanel();
+          updateRelationUi();
+          return;
+        }
+        const fromNode = graph.nodes.find((node) => node.id === msg.fromNodeId);
+        const toNode = graph.nodes.find((node) => node.id === msg.toNodeId);
+        const pairLabel = (fromNode?.label || msg.fromNodeId) + ' -> ' + (toNode?.label || msg.toNodeId);
+        aiLastRelationExplainText =
+          'AI Relation Explain [' + pairLabel + ']\\n' + String(msg.text || 'No relation explanation generated.');
+        renderAiInsightsPanel();
+        updateRelationUi();
       }
     });
 
@@ -2818,6 +3529,16 @@ export class CircuitPanel {
         hideNodeMenu();
       });
       nodeMenu.appendChild(viewCodeBtn);
+
+      if (selectedNodeId && selectedNodeId !== nodeId) {
+        const explainRelationBtn = document.createElement('button');
+        explainRelationBtn.textContent = 'Explain relation to selected';
+        explainRelationBtn.addEventListener('click', () => {
+          requestAiRelationExplain(selectedNodeId, nodeId);
+          hideNodeMenu();
+        });
+        nodeMenu.appendChild(explainRelationBtn);
+      }
 
       if (node.id !== contextBotId && nodeFeedsContextBot(node.id)) {
         const disconnectBtn = document.createElement('button');
@@ -2976,6 +3697,8 @@ export class CircuitPanel {
     resize();
     applyHudState();
     updateModeUi();
+    updateRelationUi();
+    renderAiSuggestionQueue();
     applySceneThemeByMode();
     if (skeletonRootNodeId) {
       viewMode = 'runtime';
