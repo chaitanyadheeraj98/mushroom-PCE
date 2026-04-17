@@ -1323,78 +1323,131 @@ export class CircuitPanel {
       }
     }
 
-    function layoutNodes(nodes) {
-      if (viewMode === 'architecture') {
-        const layerOrder = ['system', 'command', 'orchestration', 'state', 'ui', 'feature', 'utility', 'runtime'];
-        const layers = new Map();
-        for (let i = 0; i < layerOrder.length; i++) {
-          layers.set(layerOrder[i], []);
-        }
-        for (let i = 0; i < nodes.length; i++) {
-          const node = nodes[i];
-          const key = node.layer || (node.type === 'layer' ? 'feature' : 'runtime');
-          const arr = layers.get(key) || [];
-          arr.push(node);
-          layers.set(key, arr);
-        }
-
-        const positions = new Map();
-        const rowGap = 178;
-        const layerX = -290;
-        const fnBaseX = 240;
-        const fnColGap = 274;
-        const fnRowGap = 112;
-        const maxPerRow = 4;
-
-        for (let li = 0; li < layerOrder.length; li++) {
-          const layerKey = layerOrder[li];
-          const y = (layerOrder.length / 2 - li) * rowGap;
-          const lane = layers.get(layerKey) || [];
-          const layerNode = lane.find((n) => n.type === 'layer');
-          if (layerNode) {
-            positions.set(layerNode.id, new THREE.Vector3(layerX, y, 0));
-          }
-          const members = lane.filter((n) => n.type !== 'layer');
-          for (let mi = 0; mi < members.length; mi++) {
-            const colsInThisLayer = Math.min(maxPerRow, Math.max(1, members.length));
-            const col = mi % colsInThisLayer;
-            const row = Math.floor(mi / colsInThisLayer);
-            const totalRows = Math.ceil(members.length / colsInThisLayer);
-            const colOffset = (col - (colsInThisLayer - 1) / 2) * fnColGap;
-            const rowOffset = (row - (totalRows - 1) / 2) * fnRowGap;
-            positions.set(members[mi].id, new THREE.Vector3(fnBaseX + colOffset, y + rowOffset, 0));
-          }
-        }
-
-        for (let i = 0; i < nodes.length; i++) {
-          if (!positions.has(nodes[i].id)) {
-            positions.set(nodes[i].id, new THREE.Vector3(0, 0, 0));
-          }
-        }
+    function layoutNodes(nodes, edges) {
+      const positions = new Map();
+      if (!Array.isArray(nodes) || !nodes.length) {
         return positions;
       }
 
-      const byType = new Map();
-      for (const n of nodes) {
-        const arr = byType.get(n.type) || [];
-        arr.push(n);
-        byType.set(n.type, arr);
+      const byId = new Map(nodes.map((node) => [node.id, node]));
+      const incoming = new Map();
+      const outgoing = new Map();
+      for (const node of nodes) {
+        incoming.set(node.id, []);
+        outgoing.set(node.id, []);
       }
-      // Function-only view: show only functions and sinks.
-      const lanes = ['function', 'sink'];
-      const positions = new Map();
-      for (let li = 0; li < lanes.length; li++) {
-        const type = lanes[li];
-        const lane = byType.get(type) || [];
-          const x = (li - (lanes.length - 1) / 2) * 340;
+      for (const edge of edges || []) {
+        if (!byId.has(edge.from) || !byId.has(edge.to)) {
+          continue;
+        }
+        outgoing.get(edge.from).push(edge.to);
+        incoming.get(edge.to).push(edge.from);
+      }
+
+      const isCurrentFileNode = (node) =>
+        node &&
+        typeof node.detail === 'string' &&
+        node.detail.toLowerCase().startsWith('current file:');
+
+      const degreeOf = (nodeId) =>
+        (incoming.get(nodeId)?.length || 0) + (outgoing.get(nodeId)?.length || 0);
+
+      const currentFileCandidate = nodes.find((node) => isCurrentFileNode(node));
+      const selectedCandidate = selectedNodeId && byId.has(selectedNodeId) ? byId.get(selectedNodeId) : null;
+      const focalNode =
+        currentFileCandidate ||
+        selectedCandidate ||
+        [...nodes].sort((a, b) => degreeOf(b.id) - degreeOf(a.id))[0];
+
+      const focalId = focalNode ? focalNode.id : nodes[0].id;
+
+      const forwardDist = new Map([[focalId, 0]]);
+      const backwardDist = new Map([[focalId, 0]]);
+      const visit = (sourceMap, adjacencyMap) => {
+        const queue = [focalId];
+        while (queue.length) {
+          const current = queue.shift();
+          const nextDist = (sourceMap.get(current) || 0) + 1;
+          for (const nextId of adjacencyMap.get(current) || []) {
+            if (sourceMap.has(nextId)) {
+              continue;
+            }
+            sourceMap.set(nextId, nextDist);
+            queue.push(nextId);
+          }
+        }
+      };
+      visit(forwardDist, outgoing);
+      visit(backwardDist, incoming);
+
+      const rankById = new Map();
+      for (const node of nodes) {
+        if (node.id === focalId) {
+          rankById.set(node.id, 0);
+          continue;
+        }
+        const fd = forwardDist.get(node.id);
+        const bd = backwardDist.get(node.id);
+        if (fd !== undefined && bd !== undefined) {
+          if (fd === bd) {
+            const out = outgoing.get(node.id)?.length || 0;
+            const inc = incoming.get(node.id)?.length || 0;
+            rankById.set(node.id, out >= inc ? Math.max(1, fd) : -Math.max(1, bd));
+          } else if (fd < bd) {
+            rankById.set(node.id, Math.max(1, fd));
+          } else {
+            rankById.set(node.id, -Math.max(1, bd));
+          }
+        } else if (fd !== undefined) {
+          rankById.set(node.id, Math.max(1, fd));
+        } else if (bd !== undefined) {
+          rankById.set(node.id, -Math.max(1, bd));
+        } else {
+          rankById.set(node.id, 2);
+        }
+      }
+      rankById.set(focalId, 0);
+
+      const columns = new Map();
+      for (const node of nodes) {
+        const rank = rankById.get(node.id) || 0;
+        const lane = columns.get(rank) || [];
+        lane.push(node);
+        columns.set(rank, lane);
+      }
+
+      const sortedRanks = [...columns.keys()].sort((a, b) => a - b);
+      const xGap = currentGraphScope === 'full-architecture' ? 560 : 430;
+      const yGap = currentGraphScope === 'full-architecture' ? 150 : 124;
+
+      const laneSortWeight = (node) => {
+        const label = String(node.label || '').toLowerCase();
+        const out = outgoing.get(node.id)?.length || 0;
+        const inc = incoming.get(node.id)?.length || 0;
+        return (out + inc) * 1000 + label.length;
+      };
+
+      for (const rank of sortedRanks) {
+        const lane = columns.get(rank) || [];
+        lane.sort((a, b) => {
+          if (a.id === focalId) return -1;
+          if (b.id === focalId) return 1;
+          const wa = laneSortWeight(a);
+          const wb = laneSortWeight(b);
+          if (wa !== wb) return wb - wa;
+          return String(a.label || '').localeCompare(String(b.label || ''));
+        });
+        const laneHeight = (lane.length - 1) * yGap;
         for (let i = 0; i < lane.length; i++) {
-          const y = (-(i - (lane.length - 1) / 2)) * 114;
+          const x = rank * xGap;
+          const y = laneHeight / 2 - i * yGap;
           positions.set(lane[i].id, new THREE.Vector3(x, y, 0));
         }
       }
-      for (const n of nodes) {
-        if (!positions.has(n.id)) {
-          positions.set(n.id, new THREE.Vector3(0, 0, 0));
+
+      for (const node of nodes) {
+        if (!positions.has(node.id)) {
+          positions.set(node.id, new THREE.Vector3(0, 0, 0));
         }
       }
       return positions;
@@ -1456,7 +1509,7 @@ export class CircuitPanel {
       const isArchitectureMode = viewMode === 'architecture';
       const visibleGraph = getVisibleGraph(g);
 
-      const positions = layoutNodes(visibleGraph.nodes);
+      const positions = layoutNodes(visibleGraph.nodes, visibleGraph.edges);
       const laneTotals = new Map();
       const laneSeen = new Map();
       for (let i = 0; i < visibleGraph.edges.length; i++) {
@@ -1484,13 +1537,6 @@ export class CircuitPanel {
           group.position.copy(previous.position);
         } else if (pinnedPosition) {
           group.position.copy(pinnedPosition);
-        } else if (isArchitectureMode && node.type === 'function' && node.layer) {
-          const layerAnchor = positions.get('layer:' + node.layer);
-          if (layerAnchor) {
-            group.position.set(layerAnchor.x, layerAnchor.y, 0);
-          } else {
-            group.position.copy(targetPosition);
-          }
         } else {
           group.position.copy(targetPosition);
         }

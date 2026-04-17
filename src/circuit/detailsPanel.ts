@@ -40,12 +40,15 @@ export class CircuitDetailsPanel {
 		graph: CircuitGraph,
 		onAsk?: (request: NodeChatRequest) => Promise<string>
 	): Promise<CircuitDetailsPanel> {
-		if (CircuitDetailsPanel.currentPanel) {
-			CircuitDetailsPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
-			CircuitDetailsPanel.currentPanel.currentGraph = graph;
-			CircuitDetailsPanel.currentPanel.onAsk = onAsk;
-			await CircuitDetailsPanel.currentPanel.setNode(node);
-			return CircuitDetailsPanel.currentPanel;
+		const currentPanel = CircuitDetailsPanel.currentPanel;
+		if (currentPanel) {
+			// Treat Node Details like an inspector: update content without moving the user's chosen editor group.
+			currentPanel.currentGraph = graph;
+			currentPanel.onAsk = onAsk;
+			if (node) {
+				await currentPanel.setNode(node);
+			}
+			return currentPanel;
 		}
 
 		const panel = vscode.window.createWebviewPanel('mushroomPceCircuitDetails', 'Mushroom PCE: Node Details', vscode.ViewColumn.Beside, {
@@ -93,10 +96,7 @@ export class CircuitDetailsPanel {
 
 	private async setNode(node: CircuitNode | undefined): Promise<void> {
 		if (!node) {
-			this.currentNode = undefined;
-			this.currentSnippet = '';
-			this.chatTurns = [];
-			this.render();
+			// Ignore stale/invalid selections so the existing inspector content does not go blank.
 			return;
 		}
 		const nodeChanged = this.currentNode?.id !== node.id;
@@ -228,6 +228,12 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 		if (typeof node.line !== 'number') {
 			return getFileSnippet(doc);
 		}
+		if (isImportsNode(node)) {
+			const importsSnippet = getImportsBlockSnippet(doc, Math.max(0, node.line));
+			if (importsSnippet) {
+				return importsSnippet;
+			}
+		}
 
 		const astSnippet = tryGetAstSnippet(doc, node);
 		if (astSnippet) {
@@ -250,6 +256,7 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 		if (startText.includes('{')) {
 			let depth = 0;
 			let started = false;
+			let foundEnd = false;
 			for (let li = blockStart; li <= maxLine; li++) {
 				const text = doc.lineAt(li).text;
 				for (const ch of text) {
@@ -260,11 +267,15 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 						depth--;
 						if (started && depth <= 0) {
 							endLine = li;
+							foundEnd = true;
 							li = maxLine + 1;
 							break;
 						}
 					}
 				}
+			}
+			if (!foundEnd) {
+				endLine = maxLine;
 			}
 		}
 
@@ -273,6 +284,72 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 	} catch {
 		return '';
 	}
+}
+
+function isImportsNode(node: CircuitNode): boolean {
+	const label = String(node.label || '').toLowerCase();
+	const detail = String(node.detail || '').toLowerCase();
+	return label === 'imports' || detail.includes('codeflow | imports');
+}
+
+function getImportsBlockSnippet(doc: vscode.TextDocument, startLine: number): string {
+	const importLikeLine = (line: string): boolean => {
+		const t = line.trim();
+		if (!t) {
+			return false;
+		}
+		return (
+			t.startsWith('import ') ||
+			t.startsWith('import\t') ||
+			t.startsWith('export * from ') ||
+			t.startsWith('export {') ||
+			t.startsWith('const ') && t.includes('require(')
+		);
+	};
+
+	let firstImport = -1;
+	for (let li = startLine; li < doc.lineCount; li++) {
+		const text = doc.lineAt(li).text;
+		if (!text.trim()) {
+			continue;
+		}
+		if (importLikeLine(text)) {
+			firstImport = li;
+		}
+		break;
+	}
+	if (firstImport < 0) {
+		return '';
+	}
+
+	let endLine = firstImport;
+	let seenImport = false;
+	let blankRun = 0;
+	for (let li = firstImport; li < doc.lineCount; li++) {
+		const text = doc.lineAt(li).text;
+		const trimmed = text.trim();
+		if (!trimmed) {
+			if (seenImport) {
+				blankRun++;
+				// allow single blank separator inside import block
+				if (blankRun > 1) {
+					break;
+				}
+				endLine = li;
+			}
+			continue;
+		}
+		blankRun = 0;
+		if (importLikeLine(text)) {
+			seenImport = true;
+			endLine = li;
+			continue;
+		}
+		break;
+	}
+
+	const range = new vscode.Range(new vscode.Position(firstImport, 0), new vscode.Position(endLine, doc.lineAt(endLine).text.length));
+	return doc.getText(range).trimEnd();
 }
 
 function getFileSnippet(doc: vscode.TextDocument): string {
@@ -334,8 +411,27 @@ function tryGetAstSnippet(doc: vscode.TextDocument, node: CircuitNode): string |
 		}
 
 		if (ts.isClassDeclaration(n)) {
+			if (n.name?.text === targetLabel || (!targetClass && n.name?.text === targetName)) {
+				found = n;
+				return;
+			}
 			const nextClass = n.name?.text ?? className;
 			ts.forEachChild(n, (child) => visit(child, nextClass));
+			return;
+		}
+
+		if (ts.isInterfaceDeclaration(n) && (n.name.text === targetLabel || (!targetClass && n.name.text === targetName))) {
+			found = n;
+			return;
+		}
+
+		if (ts.isTypeAliasDeclaration(n) && (n.name.text === targetLabel || (!targetClass && n.name.text === targetName))) {
+			found = n;
+			return;
+		}
+
+		if (ts.isEnumDeclaration(n) && (n.name.text === targetLabel || (!targetClass && n.name.text === targetName))) {
+			found = n;
 			return;
 		}
 
