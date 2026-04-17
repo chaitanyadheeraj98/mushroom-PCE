@@ -9,6 +9,9 @@ import { ResponseMode, SymbolLink } from '../shared/types/appTypes';
 import { NodeChatRequest } from '../controllers/circuit/CircuitDetailsPanelController';
 import { detectLanguageMismatchWarning } from '../services/language/detectLanguageWarning';
 import { registerPceCommands } from '../commands/registerCommands';
+import { enrichCircuitGraphWithAi } from '../services/circuit/ai/enrichCircuitGraph';
+import { CircuitAiEnrichmentResult, CircuitGraph } from '../shared/types/circuitTypes';
+import { explainCircuitNodeRelationWithAi } from '../services/circuit/ai/explainNodeRelation';
 
 export function activateApp(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
@@ -24,6 +27,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 	type CacheEntry = { text: string; updatedAt: number; docVersion: number };
 	const analysisCache = new Map<string, CacheEntry>();
 	const nodeDeveloperContextCache = new Map<string, CacheEntry>();
+	const circuitAiCache = new Map<string, CircuitAiEnrichmentResult>();
 
 	const rememberEditor = (editor: vscode.TextEditor | undefined): void => {
 		if (!editor) {
@@ -245,6 +249,55 @@ export function activateApp(context: vscode.ExtensionContext) {
 		return responseText || 'No response generated.';
 	};
 
+	const requestCircuitAiEnrichment = async (graph: CircuitGraph): Promise<CircuitAiEnrichmentResult | undefined> => {
+		await loadModels();
+		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+		if (!model) {
+			return undefined;
+		}
+
+		const signature = JSON.stringify({
+			modelId: model.id,
+			nodes: graph.nodes.map((node) => ({
+				id: node.id,
+				label: node.label,
+				type: node.type,
+				layer: node.layer,
+				detail: node.detail
+			})),
+			edges: graph.edges.map((edge) => ({
+				from: edge.from,
+				to: edge.to,
+				kind: edge.kind,
+				label: edge.label
+			}))
+		});
+
+		const cached = circuitAiCache.get(signature);
+		if (cached) {
+			return cached;
+		}
+
+		const result = await enrichCircuitGraphWithAi(model, graph);
+		if (result) {
+			circuitAiCache.set(signature, result);
+		}
+		return result;
+	};
+
+	const requestCircuitRelationExplain = async (
+		graph: CircuitGraph,
+		fromNodeId: string,
+		toNodeId: string
+	): Promise<string | undefined> => {
+		await loadModels();
+		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+		if (!model) {
+			return undefined;
+		}
+		return explainCircuitNodeRelationWithAi(model, graph, fromNodeId, toNodeId);
+	};
+
 	const commandDisposables = registerPceCommands({
 		extensionUri: context.extensionUri,
 		output,
@@ -268,7 +321,9 @@ export function activateApp(context: vscode.ExtensionContext) {
 		applySymbolStateToPanel,
 		tryRestoreCachedAnalysis,
 		runAnalysis,
-		askNodeQuestion
+		askNodeQuestion,
+		requestCircuitAiEnrichment,
+		requestCircuitRelationExplain
 	});
 
 	const statusBarAnalyze = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);

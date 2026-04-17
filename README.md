@@ -1,31 +1,38 @@
 # Mushroom PCE
 
-Mushroom PCE helps you understand code faster inside VS Code with:
-- AI file explanations (Developer Mode)
-- Deterministic code inventory output (List Mode)
-- Interactive circuit-style graphs for architecture, runtime flow, and file dependencies
-- Node-level Q&A with connected context (Context Bot)
+Mushroom PCE is a VS Code extension that helps you understand code faster with AI explanations and an interactive Circuit Mode.
 
 ![Mushroom PCE Circuit Mode](images/feature-circuit.png)
 
-## What It Does
+## Key Features
 
-### File Analysis Panel
-- Starts from the active editor file
-- Streams an AI explanation in **Developer Mode**
-- Or generates a structured static inventory in **List Mode** (no AI call)
-- Converts detected symbols into clickable links so you can jump to definitions
-- Warns when the file language mode appears mismatched with the code (for better analysis quality)
+- File analysis from the active editor in two modes:
+  - Developer Mode: AI explanation with structured sections.
+  - List Mode: deterministic static inventory (no model call).
+- Symbol-aware output with clickable links (`Go To Function`).
+- Circuit Mode for architecture/runtime exploration:
+  - Current File graph
+  - Full Architecture graph
+  - Runtime CodeFlow graph
+  - Skeleton subgraph focus mode
+- Node Details panel with node-scoped chat.
+- Copyable AI output in Node Details (copy icons for answer/code blocks).
 
-### Circuit Mode
-- **Current File**: hybrid graph built from static analysis + call hierarchy enrichment
-- **Full Architecture**: 1-hop file dependency map centered on the current file
-  - `imports` mode: import/export relationships
-  - `imports-calls` mode: import/export + call-hierarchy neighbors
-- **CodeFlow**: ordered runtime-style flow blocks for top-level statements and declarations
-- **Skeleton**: isolate a node and its one-hop neighborhood for focused exploration
-- **Node Details**: inspect code snippets per node and ask node-scoped questions
-- **Context Bot**: connect selected runtime outputs into a context node and ask targeted questions
+## AI-Enhanced Circuit Mode
+
+- AI Insights for selected graph scope.
+- AI edge suggestions overlay:
+  - Dashed suggested edges
+  - Confidence display
+  - Apply/Reject all
+  - Per-edge Apply/Reject controls
+- Relation Explain workflow:
+  - Dedicated HUD controls: `Set From`, `Set To`, `Explain`, `Reset`
+  - Quick-pick relation state and AI explanation for the selected pair
+- HUD polish:
+  - Compact HUD sizing
+  - Scrollable HUD cards
+  - Better visibility of graph behind controls
 
 ## Commands
 
@@ -35,25 +42,95 @@ Mushroom PCE helps you understand code faster inside VS Code with:
 - `Mushroom PCE: Set List Mode` (`mushroom-pce.setListMode`)
 - `Mushroom PCE: Set Developer Mode` (`mushroom-pce.setDeveloperMode`)
 - `Mushroom PCE: Open Circuit Mode` (`mushroom-pce.openCircuit`)
-- `Mushroom PCE: Go To Function` (`mushroom-pce.goToFunction`) (used internally by clickable symbol links)
+- `Mushroom PCE: Go To Function` (`mushroom-pce.goToFunction`)
+
+## Project Structure
+
+```text
+src/
+  app/
+    activate.ts
+    state/
+      analysisCache.ts
+      modelState.ts
+
+  commands/
+    registerCommands.ts
+    analyzeActiveCommand.ts
+    startPceCommand.ts
+    selectModelCommand.ts
+    setListModeCommand.ts
+    setDeveloperModeCommand.ts
+    goToSymbolCommand.ts
+    openCircuitCommand.ts
+
+  controllers/
+    mushroom/
+      MushroomPanelController.ts
+    circuit/
+      CircuitPanelController.ts
+      CircuitDetailsPanelController.ts
+
+  services/
+    ai/
+      requestModelText.ts
+    analysis/
+      buildListModeOutput.ts
+      frequency.ts
+    language/
+      detectLanguageWarning.ts
+    prompts/
+      buildPrompt.ts
+    symbols/
+      parseSymbolLocations.ts
+    circuit/
+      buildGraph.ts
+      buildGraphHybrid.ts
+      buildProjectArchitectureGraph.ts
+      buildProjectGraph.ts
+      buildCodeFlowGraph.ts
+      buildSkeletonGraph.ts
+      ai/
+        enrichCircuitGraph.ts
+        explainNodeRelation.ts
+
+  views/
+    mushroom/
+      mushroomHtml.ts
+      mushroomStyles.ts
+    circuit/
+      circuitHtml.ts
+      circuitStyles.ts
+    details/
+      detailsHtml.ts
+      detailsStyles.ts
+
+  webview/
+    circuit/
+      circuitApp.ts
+
+  shared/
+    types/
+      appTypes.ts
+      circuitTypes.ts
+    webview/
+      messages.ts
+
+  utils/
+    escapeHtml.ts
+    getNonce.ts
+    markdownToHtml.ts
+    markdownToChatHtml.ts
+    regex.ts
+
+  extension.ts
+```
 
 ## Requirements
 
 - VS Code `^1.110.0`
-- Access to at least one VS Code chat/language model (for Developer Mode and node chat)
+- Access to at least one VS Code chat/language model (Developer Mode, Node Chat, AI Circuit features)
 - Node.js 18+ (development only)
-
-## Current Extension Settings
-
-This version does **not** contribute user settings in `package.json`.
-Mode/model selection is handled through commands and panel controls.
-
-## Known Limitations
-
-- Very large workspaces can take longer to build in Circuit Mode.
-- Graph accuracy depends on available symbol/call-hierarchy providers for the current language.
-- Some relationships are heuristic/fallback-labeled (for example `[fallback-medium]`) when high-confidence API data is unavailable.
-- Full Architecture currently focuses on 1-hop neighbors from the active file.
 
 ## Development
 
@@ -63,14 +140,14 @@ npm run compile
 ```
 
 Useful scripts:
+
 - `npm run watch`
+- `npm run check-types`
 - `npm run lint`
 - `npm run test`
 
-## Why Use It
+## Notes
 
-Mushroom PCE is designed for onboarding, debugging, and safe refactoring:
-- Understand unfamiliar code paths quickly
-- Visualize what calls what (and how files connect)
-- Ask focused questions at node level with connected context
-- Move from high-level architecture to concrete code lines in one workflow
+- Graph quality depends on language server symbol/call-hierarchy support.
+- Large workspaces may take longer for Full Architecture/CodeFlow views.
+- Some edges can be heuristic/fallback-labeled when high-confidence API data is unavailable.
