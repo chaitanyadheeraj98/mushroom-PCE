@@ -137,7 +137,10 @@ export class MushroomPanel {
 
 	private getHtml(): string {
 		const cspSource = this.panel.webview.cspSource;
-		const explainHtml = markdownToHtml(this.rawText, this.symbolLinks);
+		const isListMode = this.currentResponseMode === 'list';
+		const explainHtml = markdownToHtml(this.rawText, this.symbolLinks, {
+			enablePlainSymbolAutoLinking: !isListMode
+		});
 		const buttonHtml = this.analyzing
 			? '<span class="analyze-btn disabled">Analyzing...</span>'
 			: '<a id="analyzeBtn" class="analyze-btn" href="command:mushroom-pce.analyzeActive">Analyze</a>';
@@ -314,6 +317,12 @@ export class MushroomPanel {
     .content h2 { font-size: 17px; }
     .content h3 { font-size: 15px; }
     .content p { margin: 8px 0; }
+    .content .md-hr {
+      border: none;
+      border-top: 1px solid color-mix(in oklab, var(--border) 80%, white);
+      margin: 18px 0;
+      opacity: 0.9;
+    }
     .content ul, .content ol { margin: 8px 0 8px 20px; padding: 0; }
     .content li { margin: 4px 0; }
     .content li.list-section-imports { color: #a78bfa; }
@@ -351,6 +360,44 @@ export class MushroomPanel {
     .content a.symbol-link:hover { border-bottom-color: currentColor; }
     .content pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow-x: auto; margin: 10px 0; }
     .content pre code { background: transparent; border: none; border-radius: 0; padding: 0; }
+    .content.list-mode h1 { font-size: 18px; margin-top: 20px; margin-bottom: 8px; letter-spacing: 0.2px; }
+    .content.list-mode h2 { font-size: 16px; margin-top: 14px; margin-bottom: 8px; }
+    .content.list-mode h3 { font-size: 14px; margin-top: 10px; margin-bottom: 6px; color: #dbe6f7; }
+    .content.list-mode p {
+      color: #c5d4ec;
+      margin: 6px 0;
+      line-height: 1.65;
+    }
+    .content.list-mode ul,
+    .content.list-mode ol {
+      margin: 6px 0 10px 18px;
+    }
+    .content.list-mode li {
+      margin: 3px 0;
+      line-height: 1.6;
+    }
+    .content.list-mode code {
+      background: color-mix(in oklab, var(--code-bg) 55%, transparent);
+      border-color: color-mix(in oklab, var(--border) 65%, transparent);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #d8e5fb;
+      font-family: Consolas, "Courier New", monospace;
+    }
+    .content.list-mode li code {
+      font-size: 12px;
+    }
+    .content.list-mode a.symbol-link {
+      border-bottom: none;
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 2px;
+      color: #a8c8ff;
+    }
+    .content.list-mode a.symbol-link code {
+      color: inherit;
+    }
     .dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; margin-right: 8px; background: var(--accent); box-shadow: 0 0 10px color-mix(in oklab, var(--accent) 65%, white); }
     .hint { color: var(--muted); font-size: 12px; }
   </style>
@@ -384,7 +431,7 @@ export class MushroomPanel {
       <a class="fallback-link" href="command:mushroom-pce.openCircuit">Circuit Mode</a>
       <div class="hint">Update your code, then click Analyze.</div>
     </div>
-    <div class="content">${explainHtml}</div>
+    <div class="content ${isListMode ? 'list-mode' : 'developer-mode'}">${explainHtml}</div>
   </div>
 </body>
 </html>`;

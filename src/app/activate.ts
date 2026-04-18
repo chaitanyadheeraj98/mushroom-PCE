@@ -2,6 +2,7 @@
 
 import { requestModelText } from '../services/ai/requestModelText';
 import { buildListModeOutput } from '../services/analysis/buildListModeOutput';
+import { ListModeVariant, runListModePipeline } from '../services/analysis/listModePipeline';
 import { buildNodeDetailsPrompt, buildPrompt } from '../services/prompts/buildPrompt';
 import { MushroomPanel } from '../controllers/mushroom/MushroomPanelController';
 import { parseSymbolLocations } from '../services/symbols/parseSymbolLocations';
@@ -64,8 +65,16 @@ export function activateApp(context: vscode.ExtensionContext) {
 		return editor?.document ?? lastDocument;
 	};
 
-	const getCacheKey = (doc: vscode.TextDocument, mode: ResponseMode, modelId?: string): string => {
-		const keyModel = mode === 'list' ? 'local-list' : modelId ?? 'no-model';
+	const getCacheKey = (
+		doc: vscode.TextDocument,
+		mode: ResponseMode,
+		options?: { modelId?: string; listVariant?: ListModeVariant }
+	): string => {
+		if (mode === 'list') {
+			const listVariant = options?.listVariant ?? 'list-local';
+			return `${doc.uri.toString()}::${listVariant}::${mode}`;
+		}
+		const keyModel = options?.modelId ?? 'no-model';
 		return `${doc.uri.toString()}::${keyModel}::${mode}`;
 	};
 
@@ -80,6 +89,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 		}
 
 		let modelIdForCache: string | undefined;
+		let cachedLabel: string = selectedResponseMode;
 		if (selectedResponseMode !== 'list') {
 			await loadModels(panel);
 			const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
@@ -89,8 +99,28 @@ export function activateApp(context: vscode.ExtensionContext) {
 			modelIdForCache = model.id;
 		}
 
-		const key = getCacheKey(doc, selectedResponseMode, modelIdForCache);
-		const cached = analysisCache.get(key);
+		let cached: CacheEntry | undefined;
+		if (selectedResponseMode === 'list') {
+			await loadModels(panel);
+			const hasModel = availableModels.length > 0;
+			const preferredKeys = hasModel
+				? [
+					getCacheKey(doc, 'list', { listVariant: 'list-ai-polished' }),
+					getCacheKey(doc, 'list', { listVariant: 'list-local' })
+				]
+				: [getCacheKey(doc, 'list', { listVariant: 'list-local' })];
+			for (const key of preferredKeys) {
+				const hit = analysisCache.get(key);
+				if (hit) {
+					cached = hit;
+					cachedLabel = key.includes('list-ai-polished') ? 'list + ai polish' : 'list local';
+					break;
+				}
+			}
+		} else {
+			const key = getCacheKey(doc, selectedResponseMode, { modelId: modelIdForCache });
+			cached = analysisCache.get(key);
+		}
 		if (!cached) {
 			return false;
 		}
@@ -99,8 +129,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 		const stale = cached.docVersion !== doc.version;
 		panel.setStatus(
 			stale
-				? `Cached (stale: file changed) (${selectedResponseMode}) at ${new Date(cached.updatedAt).toLocaleTimeString()}`
-				: `Cached (${selectedResponseMode}) at ${new Date(cached.updatedAt).toLocaleTimeString()}`
+				? `Cached (stale: file changed) (${cachedLabel}) at ${new Date(cached.updatedAt).toLocaleTimeString()}`
+				: `Cached (${cachedLabel}) at ${new Date(cached.updatedAt).toLocaleTimeString()}`
 		);
 		return true;
 	};
@@ -170,9 +200,20 @@ export function activateApp(context: vscode.ExtensionContext) {
 
 		let finalExplanation: string | undefined;
 		let cacheModelId: string | undefined;
+		let cacheListVariant: ListModeVariant | undefined;
+		let finalStatus = `Updated at ${new Date().toLocaleTimeString()}`;
 		if (selectedResponseMode === 'list') {
-			output.appendLine('using deterministic list mode (no AI call)');
-			finalExplanation = await buildListModeOutput(document);
+			output.appendLine('using deterministic list mode stage 1: strict local extraction');
+			const canonicalListOutput = await buildListModeOutput(document);
+			await loadModels(panel);
+			const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+			const listResult = await runListModePipeline(document.languageId, canonicalListOutput, model);
+			finalExplanation = listResult.text;
+			cacheListVariant = listResult.variant;
+			finalStatus = `${listResult.statusMessage} at ${new Date().toLocaleTimeString()}`;
+			if (listResult.reason) {
+				output.appendLine(`list mode polish fallback: ${listResult.reason}`);
+			}
 		} else {
 			await loadModels(panel);
 			const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
@@ -207,12 +248,15 @@ export function activateApp(context: vscode.ExtensionContext) {
 		panel.setExplanation(finalExplanation || 'No explanation generated.');
 
 		if (finalExplanation) {
-			const cacheKey = getCacheKey(document, selectedResponseMode, cacheModelId);
+			const cacheKey = getCacheKey(document, selectedResponseMode, {
+				modelId: cacheModelId,
+				listVariant: cacheListVariant
+			});
 			analysisCache.set(cacheKey, { text: finalExplanation, updatedAt: Date.now(), docVersion: document.version });
 		}
 
 		panel.setAnalyzing(false);
-		panel.setStatus(`Updated at ${new Date().toLocaleTimeString()}`);
+		panel.setStatus(finalStatus);
 		output.appendLine('runAnalysis completed');
 	};
 

@@ -1,6 +1,10 @@
-﻿import { SymbolKind, SymbolLink } from '../shared/types/appTypes';
+import { SymbolKind, SymbolLink } from '../shared/types/appTypes';
 
-export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): string {
+type MarkdownToHtmlOptions = {
+	enablePlainSymbolAutoLinking?: boolean;
+};
+
+export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[], options?: MarkdownToHtmlOptions): string {
 	if (!markdown.trim()) {
 		return '<p>Click Analyze to explain the active file.</p>';
 	}
@@ -37,22 +41,27 @@ export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): str
 			closeList();
 			continue;
 		}
+		if (line === '---' || line === '***') {
+			closeList();
+			out.push('<hr class="md-hr" />');
+			continue;
+		}
 		if (line.startsWith('### ')) {
 			closeList();
 			currentSection = sectionKeyFromHeading(line.slice(4));
-			out.push(`<h3>${inlineMd(line.slice(4), symbolLinks)}</h3>`);
+			out.push(`<h3>${inlineMd(line.slice(4), symbolLinks, options)}</h3>`);
 			continue;
 		}
 		if (line.startsWith('## ')) {
 			closeList();
 			currentSection = sectionKeyFromHeading(line.slice(3));
-			out.push(`<h2>${inlineMd(line.slice(3), symbolLinks)}</h2>`);
+			out.push(`<h2>${inlineMd(line.slice(3), symbolLinks, options)}</h2>`);
 			continue;
 		}
 		if (line.startsWith('# ')) {
 			closeList();
 			currentSection = sectionKeyFromHeading(line.slice(2));
-			out.push(`<h1>${inlineMd(line.slice(2), symbolLinks)}</h1>`);
+			out.push(`<h1>${inlineMd(line.slice(2), symbolLinks, options)}</h1>`);
 			continue;
 		}
 		if (/^[-*]\s+/.test(line)) {
@@ -61,7 +70,7 @@ export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): str
 				out.push('<ul>');
 				listMode = 'ul';
 			}
-			out.push(`<li class="list-section-${currentSection || 'default'}">${inlineMd(line.replace(/^[-*]\s+/, ''), symbolLinks)}</li>`);
+			out.push(`<li class="list-section-${currentSection || 'default'}">${inlineMd(line.replace(/^[-*]\s+/, ''), symbolLinks, options)}</li>`);
 			continue;
 		}
 		if (/^\d+\.\s+/.test(line)) {
@@ -70,11 +79,11 @@ export function markdownToHtml(markdown: string, symbolLinks: SymbolLink[]): str
 				out.push('<ol>');
 				listMode = 'ol';
 			}
-			out.push(`<li class="list-section-${currentSection || 'default'}">${inlineMd(line.replace(/^\d+\.\s+/, ''), symbolLinks)}</li>`);
+			out.push(`<li class="list-section-${currentSection || 'default'}">${inlineMd(line.replace(/^\d+\.\s+/, ''), symbolLinks, options)}</li>`);
 			continue;
 		}
 		closeList();
-		out.push(`<p>${inlineMd(line, symbolLinks)}</p>`);
+		out.push(`<p>${inlineMd(line, symbolLinks, options)}</p>`);
 	}
 	closeList();
 	return out.join('') || '<p>No explanation generated.</p>';
@@ -90,7 +99,7 @@ function sectionKeyFromHeading(heading: string): string {
 		.replace(/\s+/g, '-');
 }
 
-function inlineMd(text: string, symbolLinks: SymbolLink[]): string {
+function inlineMd(text: string, symbolLinks: SymbolLink[], options?: MarkdownToHtmlOptions): string {
 	let result = escapeHtml(text);
 	const symbolMap = new Map<string, SymbolLink[]>();
 	for (const symbol of symbolLinks) {
@@ -117,7 +126,9 @@ function inlineMd(text: string, symbolLinks: SymbolLink[]): string {
 		return `<a class="symbol-link symbol-${symbol.kind}" href="${symbol.commandUri}" title="Go to ${escapeHtml(clean)}">${codeTag}</a>`;
 	});
 	result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-	result = linkPlainSymbolsInHtml(result, symbolLinks);
+	if (options?.enablePlainSymbolAutoLinking !== false) {
+		result = linkPlainSymbolsInHtml(result, symbolLinks);
+	}
 	return result;
 }
 
@@ -230,5 +241,3 @@ export function escapeHtml(value: string): string {
 		.replace(/"/g, '&quot;')
 		.replace(/'/g, '&#39;');
 }
-
-

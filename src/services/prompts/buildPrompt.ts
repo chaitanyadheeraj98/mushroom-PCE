@@ -163,6 +163,37 @@ ${code}
 	return responseMode === 'list' ? listPrompt : developerPrompt;
 }
 
+export function buildListFormatPolishPrompt(languageId: string, canonicalListOutput: string): string {
+	return `
+You are a professional technical formatter.
+
+TASK:
+Rewrite the provided LIST MODE extraction to be cleaner and more readable, while preserving extracted facts exactly.
+
+INPUT TYPE:
+- The input is already a deterministic static extraction.
+- Do NOT infer from source code.
+- Do NOT add concepts that are not explicitly present.
+
+STRICT RULES:
+- Keep every main section heading exactly as-is (same text, same order).
+- Keep the same number of bullet items inside each main section.
+- Do not delete any bullet item.
+- Do not merge or split bullet items.
+- Do not reclassify items into different main sections.
+- You may only improve wording, punctuation, and visual consistency.
+- Preserve code identifiers and types using backticks.
+- Output Markdown only.
+
+LANGUAGE CONTEXT: ${languageId}
+
+CANONICAL LIST OUTPUT:
+\`\`\`markdown
+${canonicalListOutput}
+\`\`\`
+`;
+}
+
 type NodePromptRequest = {
 	node: {
 		label: string;
