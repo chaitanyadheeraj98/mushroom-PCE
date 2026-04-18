@@ -790,7 +790,7 @@ export class CircuitPanel {
     </div>
     <div class="card hud-main-card">
       <div class="title">Circuit Mode</div>
-      <div class="muted">Double-click to toggle Hand mode (pan). Drag nodes to rearrange. Scroll to zoom. In Runtime CodeFlow, click an output port then click Context Bot to wire context (repeat same action to detach).</div>
+      <div class="muted">Double-click to toggle Hand mode (pan). Hold Space + drag for temporary pan. Press F to fit graph in view. Drag nodes to rearrange. Scroll to zoom. In Runtime CodeFlow, click an output port then click Context Bot to wire context (repeat same action to detach).</div>
       <div class="hud-sections">
         <div class="hud-section">
           <div class="hud-section-title">View Mode</div>
@@ -981,7 +981,9 @@ export class CircuitPanel {
     controls.enableDamping = true;
     controls.dampingFactor = 0.12;
     controls.screenSpacePanning = true;
-    controls.zoomSpeed = 0.9;
+    controls.zoomSpeed = 1.05;
+    controls.minZoom = 0.22;
+    controls.maxZoom = 3.2;
     controls.minPolarAngle = Math.PI / 2;
     controls.maxPolarAngle = Math.PI / 2;
     controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN };
@@ -1723,8 +1725,8 @@ export class CircuitPanel {
       }
 
       const sortedRanks = [...columns.keys()].sort((a, b) => a - b);
-      const xGap = currentGraphScope === 'full-architecture' ? 560 : 430;
-      const yGap = currentGraphScope === 'full-architecture' ? 150 : 124;
+      const xGap = currentGraphScope === 'full-architecture' ? 640 : 500;
+      const yGap = currentGraphScope === 'full-architecture' ? 190 : 150;
 
       const laneSortWeight = (node) => {
         const label = String(node.label || '').toLowerCase();
@@ -1789,13 +1791,13 @@ export class CircuitPanel {
       const cy = (minY + maxY) / 2;
       const boundsW = Math.max(1, maxX - minX);
       const boundsH = Math.max(1, maxY - minY);
-      const margin = 140;
+      const margin = 200;
 
       const viewW = Math.max(1, camera.right - camera.left);
       const viewH = Math.max(1, camera.top - camera.bottom);
       const zoomX = viewW / (boundsW + margin * 2);
       const zoomY = viewH / (boundsH + margin * 2);
-      const nextZoom = clamp(Math.min(zoomX, zoomY), 0.35, 2.4);
+      const nextZoom = clamp(Math.min(zoomX, zoomY), 0.22, 3.2);
 
       cameraAnim.x = cx;
       cameraAnim.y = cy;
@@ -2402,6 +2404,7 @@ export class CircuitPanel {
 
     // Hand mode (pan) like Node-RED: double-click toggles.
     let handMode = false;
+    let spacePanActive = false;
     let panning = null; // { startX, startY, camX, camY, targetX, targetY }
 
     function setCursor() {
@@ -2409,7 +2412,7 @@ export class CircuitPanel {
         canvas.style.cursor = 'grabbing';
         return;
       }
-      if (handMode) {
+      if (handMode || spacePanActive) {
         canvas.style.cursor = 'grab';
         return;
       }
@@ -3175,7 +3178,7 @@ export class CircuitPanel {
       }
 
       // Pan background if Hand mode enabled (left mouse).
-      if (handMode && ev.button === 0) {
+      if ((handMode || spacePanActive) && ev.button === 0) {
         setActivePort(null);
         panning = {
           startX: ev.clientX,
@@ -3330,6 +3333,41 @@ export class CircuitPanel {
         if (!insideFab) {
           hideFabMenu();
         }
+      }
+    });
+    window.addEventListener('keydown', (ev) => {
+      const target = ev.target;
+      const isTypingTarget =
+        target instanceof HTMLElement &&
+        (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable
+        );
+      if (isTypingTarget) {
+        return;
+      }
+      if (ev.code === 'Space') {
+        spacePanActive = true;
+        setCursor();
+        ev.preventDefault();
+        return;
+      }
+      if (ev.key === 'f' || ev.key === 'F') {
+        fitViewToGraph();
+        ev.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', (ev) => {
+      if (ev.code === 'Space') {
+        spacePanActive = false;
+        setCursor();
+      }
+    });
+    window.addEventListener('blur', () => {
+      if (spacePanActive) {
+        spacePanActive = false;
+        setCursor();
       }
     });
     canvas.addEventListener('dblclick', (ev) => {
