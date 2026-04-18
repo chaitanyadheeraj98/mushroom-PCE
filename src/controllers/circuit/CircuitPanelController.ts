@@ -1495,6 +1495,17 @@ export class CircuitPanel {
       vscode?.postMessage({ type: 'updateGraph', graph });
     }
 
+    function toggleContextConnectionForNode(nodeId) {
+      if (!nodeId || nodeId === contextBotId) {
+        return;
+      }
+      if (nodeFeedsContextBot(nodeId)) {
+        disconnectNodeFromContextBot(nodeId);
+      } else {
+        connectNodeToContextBot(nodeId);
+      }
+    }
+
     function beginContextConnectFromPort(portHit) {
       if (!portHit || !portHit.userData) {
         return;
@@ -3104,7 +3115,7 @@ export class CircuitPanel {
         setActivePort(phit);
         const nodeId = String(phit.userData.nodeId || '');
         const direction = String(phit.userData.direction || '');
-        if (connectPreview.active && nodeId === contextBotId && direction === 'in') {
+        if (connectPreview.active && nodeId === contextBotId) {
           completeContextConnect();
           return;
         }
@@ -3219,21 +3230,6 @@ export class CircuitPanel {
           }
           if (node && vscode && (node.type === 'function' || node.type === 'sink' || node.type === 'module' || node.type === 'utility')) {
             vscode.postMessage({ type: 'navigate', nodeId: node.id });
-          }
-
-          // CodeFlow behavior: clicking current step advances focus to next step.
-          if (node && viewMode === 'runtime' && isCodeFlowGraph(graph)) {
-            const nextId = getNextCodeFlowNodeId(node.id);
-            if (nextId && nextId !== node.id) {
-              selectedNodeId = nextId;
-              const nextNode = nodeMeta.get(nextId)?.node;
-              if (nextNode) {
-                setDetails(nextNode);
-                if (vscode) {
-                  vscode.postMessage({ type: 'navigate', nodeId: nextNode.id });
-                }
-              }
-            }
           }
         } else if (meta) {
           manualNodePositions.set(nodeId, meta.group.position.clone());
