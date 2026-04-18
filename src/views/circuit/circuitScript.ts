@@ -1642,6 +1642,15 @@ export function buildCircuitWebviewScript(
       if (modeRuntimeBtn) {
         modeRuntimeBtn.classList.toggle('active', viewMode === 'runtime');
       }
+      if (fullArchitectureBtn) {
+        fullArchitectureBtn.classList.toggle('active', currentGraphScope === 'full-architecture');
+      }
+      if (currentFileBtn) {
+        currentFileBtn.classList.toggle('active', currentGraphScope === 'current-file');
+      }
+      if (codeFlowBtn) {
+        codeFlowBtn.classList.toggle('active', currentGraphScope === 'codeflow');
+      }
       if (edgeFilterBtn) {
         edgeFilterBtn.textContent = edgeFilterMode === 'api-high' ? 'Edges: API-high' : 'Edges: All';
       }
@@ -1786,6 +1795,10 @@ export function buildCircuitWebviewScript(
     }
 
     function updateRelationUi() {
+      const hasFrom = !!relationFromNodeId;
+      const hasTo = !!relationToNodeId;
+      const canExplain = hasFrom && hasTo && relationFromNodeId !== relationToNodeId;
+
       if (relationStateEl) {
         relationStateEl.textContent =
           'From: ' + getNodeLabelForRelation(relationFromNodeId) +
@@ -1793,18 +1806,19 @@ export function buildCircuitWebviewScript(
       }
       if (relationSetFromBtn) {
         relationSetFromBtn.disabled = !selectedNodeId;
+        relationSetFromBtn.classList.toggle('active', hasFrom);
       }
       if (relationSetToBtn) {
         relationSetToBtn.disabled = !selectedNodeId;
+        relationSetToBtn.classList.toggle('active', hasTo);
       }
       if (relationExplainBtn) {
-        relationExplainBtn.disabled =
-          !relationFromNodeId ||
-          !relationToNodeId ||
-          relationFromNodeId === relationToNodeId;
+        relationExplainBtn.disabled = !canExplain;
+        relationExplainBtn.classList.toggle('active', canExplain);
       }
       if (relationResetBtn) {
-        relationResetBtn.disabled = !relationFromNodeId && !relationToNodeId;
+        relationResetBtn.disabled = !hasFrom && !hasTo;
+        relationResetBtn.classList.toggle('active', hasFrom || hasTo);
       }
     }
 
@@ -2036,6 +2050,7 @@ export function buildCircuitWebviewScript(
         return;
       }
       currentGraphScope = scope;
+      updateModeUi();
       if (scope === 'full-architecture') {
         skeletonRootNodeId = null;
         skeletonNodeIds = null;
@@ -2080,6 +2095,7 @@ export function buildCircuitWebviewScript(
         }
         if (depImportsBtn) depImportsBtn.disabled = currentGraphScope !== 'full-architecture';
         if (depImportsCallsBtn) depImportsCallsBtn.disabled = currentGraphScope !== 'full-architecture';
+        updateModeUi();
       }, 1200);
     }
 
