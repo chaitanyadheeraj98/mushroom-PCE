@@ -24,7 +24,7 @@ type RegisterCommandsDeps = {
 	setSelectedResponseMode: (mode: ResponseMode) => void;
 	applyModeStateToPanel: (panel: MushroomPanel) => void;
 	applyModelStateToPanel: (panel: MushroomPanel) => void;
-	applySymbolStateToPanel: (panel: MushroomPanel, document: vscode.TextDocument) => void;
+	applySymbolStateToPanel: (panel: MushroomPanel, document: vscode.TextDocument) => Promise<void>;
 	tryRestoreCachedAnalysis: (panel: MushroomPanel) => Promise<boolean>;
 	runAnalysis: (panel: MushroomPanel) => Promise<void>;
 	askNodeQuestion: (request: NodeChatRequest) => Promise<string>;
@@ -55,7 +55,7 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 
 		const currentDoc = deps.getCurrentDocument();
 		if (currentDoc) {
-			deps.applySymbolStateToPanel(panel, currentDoc);
+			await deps.applySymbolStateToPanel(panel, currentDoc);
 		}
 
 		await deps.loadModels(panel);

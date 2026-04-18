@@ -1,7 +1,7 @@
 ﻿import * as vscode from 'vscode';
-import * as ts from 'typescript';
 
 import { CircuitEdge, CircuitGraph, CircuitNode } from '../../shared/types/circuitTypes';
+import { NormalizedDocumentSymbol, getNormalizedDocumentSymbols } from '../../services/symbols/documentSymbols';
 
 const FILE_SNIPPET_MAX_LINES = 400;
 const FILE_SNIPPET_MAX_CHARS = 24000;
@@ -235,9 +235,9 @@ async function getSnippet(node: CircuitNode): Promise<string> {
 			}
 		}
 
-		const astSnippet = tryGetAstSnippet(doc, node);
-		if (astSnippet) {
-			return astSnippet;
+		const symbolSnippet = await tryGetSymbolSnippet(doc, node);
+		if (symbolSnippet) {
+			return symbolSnippet;
 		}
 
 		const startLine = Math.max(0, node.line);
@@ -378,107 +378,81 @@ function getFileSnippet(doc: vscode.TextDocument): string {
 	return snippet;
 }
 
-function tryGetAstSnippet(doc: vscode.TextDocument, node: CircuitNode): string | undefined {
-	const code = doc.getText();
-	const sourceFile = ts.createSourceFile(doc.fileName, code, ts.ScriptTarget.Latest, true, inferScriptKind(doc.languageId));
-
-	const targetLabel = node.label;
-	const dottedParts = targetLabel.split('.');
-	const targetClass = dottedParts.length > 1 ? dottedParts.slice(0, -1).join('.') : undefined;
-	const targetName = dottedParts[dottedParts.length - 1];
-
-	let found: ts.Node | undefined;
-	const visit = (n: ts.Node, className?: string) => {
-		if (found) {
-			return;
-		}
-
-		if (ts.isFunctionDeclaration(n) && n.name?.text === targetLabel) {
-			found = n;
-			return;
-		}
-
-		if (ts.isVariableStatement(n)) {
-			for (const d of n.declarationList.declarations) {
-				if (!ts.isIdentifier(d.name) || !d.initializer) {
-					continue;
-				}
-				if ((ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)) && d.name.text === targetLabel) {
-					found = n;
-					return;
-				}
-			}
-		}
-
-		if (ts.isClassDeclaration(n)) {
-			if (n.name?.text === targetLabel || (!targetClass && n.name?.text === targetName)) {
-				found = n;
-				return;
-			}
-			const nextClass = n.name?.text ?? className;
-			ts.forEachChild(n, (child) => visit(child, nextClass));
-			return;
-		}
-
-		if (ts.isInterfaceDeclaration(n) && (n.name.text === targetLabel || (!targetClass && n.name.text === targetName))) {
-			found = n;
-			return;
-		}
-
-		if (ts.isTypeAliasDeclaration(n) && (n.name.text === targetLabel || (!targetClass && n.name.text === targetName))) {
-			found = n;
-			return;
-		}
-
-		if (ts.isEnumDeclaration(n) && (n.name.text === targetLabel || (!targetClass && n.name.text === targetName))) {
-			found = n;
-			return;
-		}
-
-		if (ts.isMethodDeclaration(n)) {
-			const methodName = getMethodName(n.name);
-			if (methodName) {
-				const full = className ? `${className}.${methodName}` : methodName;
-				if (full === targetLabel || (!targetClass && methodName === targetName)) {
-					found = n;
-					return;
-				}
-			}
-		}
-
-		ts.forEachChild(n, (child) => visit(child, className));
-	};
-
-	visit(sourceFile);
-
-	if (!found) {
+async function tryGetSymbolSnippet(doc: vscode.TextDocument, node: CircuitNode): Promise<string | undefined> {
+	const symbols = await getNormalizedDocumentSymbols(doc.uri);
+	if (!symbols.length) {
 		return undefined;
 	}
-	const start = found.getStart(sourceFile);
-	const end = found.getEnd();
-	return code.slice(start, end);
+
+	const targetLabel = String(node.label || '').trim();
+	if (!targetLabel) {
+		return undefined;
+	}
+
+	const dotted = targetLabel.split('.');
+	const targetName = dotted[dotted.length - 1];
+	const targetContainer = dotted.length > 1 ? dotted.slice(0, -1).join('.') : '';
+
+	let best: { symbol: NormalizedDocumentSymbol; score: number } | undefined;
+	for (const symbol of symbols) {
+		const score = scoreSymbolMatch(symbol, targetLabel, targetName, targetContainer, node.line);
+		if (score <= 0) {
+			continue;
+		}
+		if (!best || score > best.score) {
+			best = { symbol, score };
+		}
+	}
+
+	if (!best) {
+		return undefined;
+	}
+
+	const startLine = Math.max(0, best.symbol.range.start.line);
+	const endLine = Math.min(doc.lineCount - 1, best.symbol.range.end.line);
+	const range = new vscode.Range(
+		new vscode.Position(startLine, 0),
+		new vscode.Position(endLine, doc.lineAt(endLine).text.length)
+	);
+	const snippet = doc.getText(range).trimEnd();
+	return snippet || undefined;
 }
 
-function getMethodName(name: ts.PropertyName): string | undefined {
-	if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
-		return name.text;
+function scoreSymbolMatch(
+	symbol: NormalizedDocumentSymbol,
+	targetLabel: string,
+	targetName: string,
+	targetContainer: string,
+	targetLine: number | undefined
+): number {
+	let score = 0;
+	if (symbol.fullName === targetLabel) {
+		score += 120;
 	}
-	return undefined;
-}
+	if (symbol.name === targetLabel) {
+		score += 110;
+	}
+	if (symbol.name === targetName) {
+		score += 80;
+	}
 
-function inferScriptKind(languageId: string): ts.ScriptKind {
-	switch ((languageId || '').toLowerCase()) {
-		case 'javascript':
-		case 'javascriptreact':
-			return ts.ScriptKind.JS;
-		case 'typescript':
-		case 'typescriptreact':
-			return ts.ScriptKind.TS;
-		case 'json':
-			return ts.ScriptKind.JSON;
-		default:
-			return ts.ScriptKind.Unknown;
+	if (targetContainer) {
+		if (symbol.fullName.endsWith(`.${targetName}`) && symbol.fullName.includes(targetContainer)) {
+			score += 45;
+		}
+	} else if (!symbol.fullName.includes('.') && symbol.name === targetName) {
+		score += 20;
 	}
+
+	if (typeof targetLine === 'number') {
+		const distance = Math.abs(symbol.selectionRange.start.line - targetLine);
+		score += Math.max(0, 40 - distance);
+		if (distance === 0) {
+			score += 30;
+		}
+	}
+
+	return score;
 }
 
 function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[], asking: boolean): string {
@@ -873,4 +847,3 @@ function markdownToChatHtml(markdown: string): string {
 	closeList();
 	return `<div class="msg msg-markdown">${out.join('') || '<p>No response generated.</p>'}</div>`;
 }
-

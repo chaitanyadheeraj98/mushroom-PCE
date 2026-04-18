@@ -105,8 +105,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 		return true;
 	};
 
-	const applySymbolStateToPanel = (panel: MushroomPanel, document: vscode.TextDocument): void => {
-		const locations = parseSymbolLocations(document);
+	const applySymbolStateToPanel = async (panel: MushroomPanel, document: vscode.TextDocument): Promise<void> => {
+		const locations = await parseSymbolLocations(document);
 		const links: SymbolLink[] = locations.map((loc) => {
 			const args = encodeURIComponent(JSON.stringify([loc.uri.toString(), loc.line, loc.character]));
 			return {
@@ -148,7 +148,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 			return;
 		}
 		lastDocument = document;
-		applySymbolStateToPanel(panel, document);
+		await applySymbolStateToPanel(panel, document);
 
 		const code = document.getText();
 		if (!code.trim()) {
@@ -336,7 +336,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 		rememberEditor(editor);
 		const panel = MushroomPanel.getCurrentPanel();
 		if (panel && !panel.isDisposed() && editor?.document) {
-			applySymbolStateToPanel(panel, editor.document);
+			void applySymbolStateToPanel(panel, editor.document);
 		}
 	});
 
@@ -353,7 +353,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 			clearTimeout(symbolIndexTimer);
 		}
 		symbolIndexTimer = setTimeout(() => {
-			applySymbolStateToPanel(panel, event.document);
+			void applySymbolStateToPanel(panel, event.document);
 		}, 250);
 	});
 
