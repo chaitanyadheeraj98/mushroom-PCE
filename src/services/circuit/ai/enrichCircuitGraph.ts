@@ -18,7 +18,8 @@ type EnrichmentEnvelope = {
 
 export async function enrichCircuitGraphWithAi(
 	model: vscode.LanguageModelChat,
-	graph: CircuitGraph
+	graph: CircuitGraph,
+	signal?: AbortSignal
 ): Promise<CircuitAiEnrichmentResult | undefined> {
 	const compact = buildCompactGraphContext(graph);
 	if (!compact.nodes.length) {
@@ -32,7 +33,7 @@ export async function enrichCircuitGraphWithAi(
 	}
 
 	const prompt = buildPrompt(compact);
-	const response = await requestModelText(model, prompt);
+	const response = await requestModelText(model, prompt, { signal });
 	const parsed = tryParseEnvelope(response || '');
 	if (!parsed) {
 		return undefined;

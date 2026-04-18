@@ -1,5 +1,6 @@
 ﻿import * as vscode from 'vscode';
 
+import { AiJobCancelledError, AiJobOrchestrator, isAiJobCancelledError } from '../services/ai/aiJobOrchestrator';
 import { requestModelText } from '../services/ai/requestModelText';
 import { buildListModeOutput } from '../services/analysis/buildListModeOutput';
 import { ListModeVariant, runListModePipeline } from '../services/analysis/listModePipeline';
@@ -29,6 +30,14 @@ export function activateApp(context: vscode.ExtensionContext) {
 	const analysisCache = new Map<string, CacheEntry>();
 	const nodeDeveloperContextCache = new Map<string, CacheEntry>();
 	const circuitAiCache = new Map<string, CircuitAiEnrichmentResult>();
+	const aiJobs = new AiJobOrchestrator({
+		maxConcurrent: 2,
+		laneLimits: {
+			analysis: 1,
+			'node-chat': 1,
+			'circuit-ai': 1
+		}
+	});
 
 	const rememberEditor = (editor: vscode.TextEditor | undefined): void => {
 		if (!editor) {
@@ -198,99 +207,169 @@ export function activateApp(context: vscode.ExtensionContext) {
 		panel.setStatus('Analyzing...');
 		output.appendLine(`Analyzing mode=${selectedResponseMode}, language=${document.languageId}, chars=${code.length}`);
 
-		let finalExplanation: string | undefined;
-		let cacheModelId: string | undefined;
-		let cacheListVariant: ListModeVariant | undefined;
-		let finalStatus = `Updated at ${new Date().toLocaleTimeString()}`;
-		if (selectedResponseMode === 'list') {
-			output.appendLine('using deterministic list mode stage 1: strict local extraction');
-			const canonicalListOutput = await buildListModeOutput(document);
-			await loadModels(panel);
-			const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
-			const listResult = await runListModePipeline(document.languageId, canonicalListOutput, model);
-			finalExplanation = listResult.text;
-			cacheListVariant = listResult.variant;
-			finalStatus = `${listResult.statusMessage} at ${new Date().toLocaleTimeString()}`;
-			if (listResult.reason) {
-				output.appendLine(`list mode polish fallback: ${listResult.reason}`);
+		const ensureCurrentRequest = (signal: AbortSignal): void => {
+			if (signal.aborted) {
+				throw new AiJobCancelledError(String(signal.reason ?? 'Cancelled'));
 			}
-		} else {
-			await loadModels(panel);
-			const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
-			if (!model) {
-				panel.setAnalyzing(false);
-				panel.setStatus('No model available');
-				panel.setExplanation('No AI model is currently available. Open Copilot/Chat model access and try again.');
-				output.appendLine('runAnalysis aborted: no model available');
-				return;
+			if (runId !== latestRunId || panel.isDisposed()) {
+				throw new AiJobCancelledError('Superseded by newer request');
 			}
-			cacheModelId = model.id;
-			output.appendLine(`using model id=${model.id}`);
+		};
 
-			const explanation = await explainCode(model, code, document.languageId, selectedResponseMode, (chunk) => {
-				if (runId !== latestRunId || panel.isDisposed()) {
-					return;
+		try {
+			const result = await aiJobs.schedule<{
+				explanation: string;
+				status: string;
+				cacheModelId?: string;
+				cacheListVariant?: ListModeVariant;
+			}>({
+				lane: 'analysis',
+				group: 'analysis:active-file',
+				supersedeGroup: true,
+				priority: 100,
+				run: async (signal) => {
+					ensureCurrentRequest(signal);
+
+					if (selectedResponseMode === 'list') {
+						output.appendLine('using deterministic list mode stage 1: strict local extraction');
+						const canonicalListOutput = await buildListModeOutput(document);
+						ensureCurrentRequest(signal);
+						await loadModels(panel);
+						ensureCurrentRequest(signal);
+						const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+						const listResult = await runListModePipeline(
+							document.languageId,
+							canonicalListOutput,
+							model,
+							requestModelText,
+							signal
+						);
+						if (listResult.reason) {
+							output.appendLine(`list mode polish fallback: ${listResult.reason}`);
+						}
+						return {
+							explanation: listResult.text || 'No explanation generated.',
+							status: `${listResult.statusMessage} at ${new Date().toLocaleTimeString()}`,
+							cacheListVariant: listResult.variant
+						};
+					}
+
+					await loadModels(panel);
+					ensureCurrentRequest(signal);
+					const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+					if (!model) {
+						return {
+							explanation: 'No AI model is currently available. Open Copilot/Chat model access and try again.',
+							status: 'No model available'
+						};
+					}
+
+					output.appendLine(`using model id=${model.id}`);
+					const explanation = await explainCode(
+						model,
+						code,
+						document.languageId,
+						selectedResponseMode,
+						(chunk) => {
+							if (runId !== latestRunId || panel.isDisposed() || signal.aborted) {
+								return;
+							}
+							panel.appendChunk(chunk);
+						},
+						signal
+					);
+					ensureCurrentRequest(signal);
+
+					return {
+						explanation: explanation || 'No explanation generated.',
+						status: `Updated at ${new Date().toLocaleTimeString()}`,
+						cacheModelId: model.id
+					};
 				}
-				panel.appendChunk(chunk);
 			});
 
 			if (runId !== latestRunId || panel.isDisposed()) {
 				return;
 			}
 
-			finalExplanation = explanation;
+			panel.setExplanation(result.explanation);
+			if (result.explanation && result.status !== 'No model available') {
+				const cacheKey = getCacheKey(document, selectedResponseMode, {
+					modelId: result.cacheModelId,
+					listVariant: result.cacheListVariant
+				});
+				analysisCache.set(cacheKey, { text: result.explanation, updatedAt: Date.now(), docVersion: document.version });
+			}
+			panel.setStatus(result.status);
+			output.appendLine('runAnalysis completed');
+		} catch (error: unknown) {
+			if (runId !== latestRunId || panel.isDisposed()) {
+				return;
+			}
+			if (isAiJobCancelledError(error)) {
+				panel.setStatus('Analysis superseded by newer request');
+				output.appendLine('runAnalysis cancelled/superseded');
+				return;
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			panel.setStatus('Analysis failed');
+			panel.setExplanation(`Error: ${message}`);
+			output.appendLine(`runAnalysis failed: ${message}`);
+		} finally {
+			if (runId === latestRunId && !panel.isDisposed()) {
+				panel.setAnalyzing(false);
+			}
 		}
-
-		if (runId !== latestRunId || panel.isDisposed()) {
-			return;
-		}
-
-		panel.setExplanation(finalExplanation || 'No explanation generated.');
-
-		if (finalExplanation) {
-			const cacheKey = getCacheKey(document, selectedResponseMode, {
-				modelId: cacheModelId,
-				listVariant: cacheListVariant
-			});
-			analysisCache.set(cacheKey, { text: finalExplanation, updatedAt: Date.now(), docVersion: document.version });
-		}
-
-		panel.setAnalyzing(false);
-		panel.setStatus(finalStatus);
-		output.appendLine('runAnalysis completed');
 	};
 
 	const askNodeQuestion = async (request: NodeChatRequest): Promise<string> => {
-		await loadModels();
-		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
-		if (!model) {
-			return 'No AI model is currently available. Open Copilot/Chat model access and try again.';
-		}
+		return aiJobs.schedule<string>({
+			lane: 'node-chat',
+			group: `node-chat:${request.node.id}`,
+			priority: 40,
+			run: async (signal) => {
+				await loadModels();
+				if (signal.aborted) {
+					throw new AiJobCancelledError(String(signal.reason ?? 'Cancelled'));
+				}
+				const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+				if (!model) {
+					return 'No AI model is currently available. Open Copilot/Chat model access and try again.';
+				}
 
-		if (String(request.node.label || '').toLowerCase().includes('context bot')) {
-			const doc = getCurrentDocument();
-			if (doc) {
-				const cacheKey = `${doc.uri.toString()}::${model.id}::developer-context`;
-				const cached = nodeDeveloperContextCache.get(cacheKey);
-				if (cached && cached.docVersion === doc.version) {
-					request.developerAnalysis = cached.text;
-				} else {
-					const generated = await explainCode(model, doc.getText(), doc.languageId, 'developer');
-					if (generated?.trim()) {
-						request.developerAnalysis = generated;
-						nodeDeveloperContextCache.set(cacheKey, {
-							text: generated,
-							updatedAt: Date.now(),
-							docVersion: doc.version
-						});
+				if (String(request.node.label || '').toLowerCase().includes('context bot')) {
+					const doc = getCurrentDocument();
+					if (doc) {
+						const cacheKey = `${doc.uri.toString()}::${model.id}::developer-context`;
+						const cached = nodeDeveloperContextCache.get(cacheKey);
+						if (cached && cached.docVersion === doc.version) {
+							request.developerAnalysis = cached.text;
+						} else {
+							const generated = await explainCode(
+								model,
+								doc.getText(),
+								doc.languageId,
+								'developer',
+								undefined,
+								signal
+							);
+							if (generated?.trim()) {
+								request.developerAnalysis = generated;
+								nodeDeveloperContextCache.set(cacheKey, {
+									text: generated,
+									updatedAt: Date.now(),
+									docVersion: doc.version
+								});
+							}
+						}
 					}
 				}
-			}
-		}
 
-		const prompt = buildNodeDetailsPrompt(request);
-		const responseText = await requestModelText(model, prompt);
-		return responseText || 'No response generated.';
+				const prompt = buildNodeDetailsPrompt(request);
+				const responseText = await requestModelText(model, prompt, { signal });
+				return responseText || 'No response generated.';
+			}
+		});
 	};
 
 	const requestCircuitAiEnrichment = async (graph: CircuitGraph): Promise<CircuitAiEnrichmentResult | undefined> => {
@@ -322,7 +401,13 @@ export function activateApp(context: vscode.ExtensionContext) {
 			return cached;
 		}
 
-		const result = await enrichCircuitGraphWithAi(model, graph);
+		const result = await aiJobs.schedule<CircuitAiEnrichmentResult | undefined>({
+			lane: 'circuit-ai',
+			key: `circuit-ai-enrich:${signature}`,
+			group: 'circuit-ai:enrich',
+			priority: 20,
+			run: async (signal) => enrichCircuitGraphWithAi(model, graph, signal)
+		});
 		if (result) {
 			circuitAiCache.set(signature, result);
 		}
@@ -339,7 +424,14 @@ export function activateApp(context: vscode.ExtensionContext) {
 		if (!model) {
 			return undefined;
 		}
-		return explainCircuitNodeRelationWithAi(model, graph, fromNodeId, toNodeId);
+		const relationKey = `circuit-ai-relation:${model.id}:${fromNodeId}:${toNodeId}:${graph.nodes.length}:${graph.edges.length}`;
+		return aiJobs.schedule<string | undefined>({
+			lane: 'circuit-ai',
+			key: relationKey,
+			group: 'circuit-ai:relation',
+			priority: 25,
+			run: async (signal) => explainCircuitNodeRelationWithAi(model, graph, fromNodeId, toNodeId, signal)
+		});
 	};
 
 	const commandDisposables = registerPceCommands({
@@ -416,11 +508,12 @@ async function explainCode(
 	code: string,
 	languageId: string,
 	responseMode: ResponseMode,
-	onChunk?: (chunk: string) => void
+	onChunk?: (chunk: string) => void,
+	signal?: AbortSignal
 ): Promise<string | undefined> {
 	try {
 		const prompt = buildPrompt(languageId, code, responseMode);
-		return await requestModelText(model, prompt, onChunk);
+		return await requestModelText(model, prompt, { onChunk, signal });
 	} catch (error: any) {
 		vscode.window.showErrorMessage('Error: ' + error.message);
 		return;

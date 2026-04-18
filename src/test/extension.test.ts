@@ -5,7 +5,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { buildListModeOutput } from '../services/analysis/buildListModeOutput';
 import { runListModePipeline } from '../services/analysis/listModePipeline';
-import { parseListStructure, validateListPolish } from '../services/analysis/verifyListPolish';
+import { parseListStructure, sanitizeListPolishCandidate, validateListPolish } from '../services/analysis/verifyListPolish';
 import { buildListFormatPolishPrompt } from '../services/prompts/buildPrompt';
 import { buildCircuitGraph } from '../services/circuit/buildGraph';
 
@@ -122,6 +122,8 @@ export class CircuitPanel {
 		});
 
 		const output = await buildListModeOutput(doc);
+		assert.ok(!output.startsWith('Here is a **strict structured extraction**'), 'List output should not include prose preface');
+		assert.ok(output.trimStart().startsWith('# IMPORTS'), 'List output should start with a section heading');
 		assert.ok(output.includes('# IMPORTS'));
 		assert.ok(output.includes('`vscode (namespace import)`'));
 		assert.ok(output.includes('`CircuitGraph (type)`'));
@@ -199,6 +201,34 @@ export class CircuitPanel {
 		assert.strictEqual(result.ok, true);
 	});
 
+	test('List polish sanitizer unwraps fenced markdown response', () => {
+		const fenced = `
+\`\`\`markdown
+# IMPORTS
+* \`vscode\`
+\`\`\`
+`;
+		const sanitized = sanitizeListPolishCandidate(fenced);
+		assert.ok(sanitized.startsWith('# IMPORTS'));
+		assert.ok(!sanitized.includes('```'));
+	});
+
+	test('List polish validator rejects prose wrappers', () => {
+		const canonical = `
+# IMPORTS
+* \`vscode\`
+`;
+		const polished = `
+Here is your polished list:
+
+# IMPORTS
+* \`vscode\`
+`;
+		const result = validateListPolish(canonical, polished);
+		assert.strictEqual(result.ok, false);
+		assert.ok(String(result.reason || '').includes('must start at a main section heading'));
+	});
+
 	test('List mode pipeline returns local-only output when model is unavailable', async () => {
 		const canonical = `
 # IMPORTS
@@ -230,6 +260,30 @@ export class CircuitPanel {
 		assert.strictEqual(result.variant, 'list-ai-polished');
 		assert.strictEqual(result.text.trim(), polished.trim());
 		assert.ok(result.statusMessage.includes('AI polished'));
+	});
+
+	test('List mode pipeline unwraps fenced AI-polished output when structure is preserved', async () => {
+		const canonical = `
+# IMPORTS
+* \`vscode\`
+
+# EXPORTS
+* \`CircuitPanel\`
+`;
+		const fencedPolished = `
+\`\`\`markdown
+# IMPORTS
+* \`vscode\` (namespace import)
+
+# EXPORTS
+* \`CircuitPanel\` (class)
+\`\`\`
+`;
+		const fakeModel = { id: 'fake-model' } as unknown as vscode.LanguageModelChat;
+		const result = await runListModePipeline('typescript', canonical, fakeModel, async () => fencedPolished);
+		assert.strictEqual(result.variant, 'list-ai-polished');
+		assert.ok(!result.text.includes('```'));
+		assert.ok(result.text.trim().startsWith('# IMPORTS'));
 	});
 
 	test('List mode pipeline falls back when AI polish breaks section shape', async () => {

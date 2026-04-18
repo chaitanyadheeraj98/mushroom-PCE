@@ -7,7 +7,8 @@ export async function explainCircuitNodeRelationWithAi(
 	model: vscode.LanguageModelChat,
 	graph: CircuitGraph,
 	fromNodeId: string,
-	toNodeId: string
+	toNodeId: string,
+	signal?: AbortSignal
 ): Promise<string | undefined> {
 	const byId = new Map(graph.nodes.map((node) => [node.id, node] as const));
 	const fromNode = byId.get(fromNodeId);
@@ -61,7 +62,7 @@ SHORTEST PATH (by node ids, directed):
 ${JSON.stringify(shortestPath ?? [])}
 `;
 
-	return requestModelText(model, prompt);
+	return requestModelText(model, prompt, { signal });
 }
 
 function findShortestPath(graph: CircuitGraph, fromId: string, toId: string): string[] | undefined {

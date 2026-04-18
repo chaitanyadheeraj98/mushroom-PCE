@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { requestModelText } from '../ai/requestModelText';
 import { buildListFormatPolishPrompt } from '../prompts/buildPrompt';
-import { validateListPolish } from './verifyListPolish';
+import { sanitizeListPolishCandidate, validateListPolish } from './verifyListPolish';
 
 export type ListModeVariant = 'list-local' | 'list-ai-polished';
 
@@ -17,8 +17,22 @@ export async function runListModePipeline(
 	languageId: string,
 	canonicalListOutput: string,
 	model: vscode.LanguageModelChat | undefined,
-	requestPolish?: (model: vscode.LanguageModelChat, prompt: string) => Promise<string | undefined>
+	requestPolish?: (
+		model: vscode.LanguageModelChat,
+		prompt: string,
+		options?: { signal?: AbortSignal }
+	) => Promise<string | undefined>,
+	signal?: AbortSignal
 ): Promise<ListModePipelineResult> {
+	if (signal?.aborted) {
+		return {
+			text: canonicalListOutput,
+			variant: 'list-local',
+			statusMessage: 'List Mode (local only): analysis cancelled before AI polish',
+			reason: 'request cancelled'
+		};
+	}
+
 	if (!model) {
 		return {
 			text: canonicalListOutput,
@@ -33,7 +47,7 @@ export async function runListModePipeline(
 
 	let polishedText: string | undefined;
 	try {
-		polishedText = await send(model, prompt);
+		polishedText = await send(model, prompt, { signal });
 	} catch (error: any) {
 		return {
 			text: canonicalListOutput,
@@ -43,7 +57,7 @@ export async function runListModePipeline(
 		};
 	}
 
-	const cleaned = String(polishedText || '').trim();
+	const cleaned = sanitizeListPolishCandidate(polishedText || '');
 	if (!cleaned) {
 		return {
 			text: canonicalListOutput,

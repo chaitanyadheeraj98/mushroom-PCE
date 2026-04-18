@@ -12,6 +12,20 @@ export type ListPolishValidation = {
 	reason?: string;
 };
 
+export function sanitizeListPolishCandidate(markdown: string): string {
+	const raw = String(markdown || '').trim();
+	if (!raw) {
+		return '';
+	}
+
+	const fenced = raw.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i);
+	if (fenced?.[1]) {
+		return fenced[1].trim();
+	}
+
+	return raw;
+}
+
 export function parseListStructure(markdown: string): ListStructure {
 	const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
 	const sections: ListSectionShape[] = [];
@@ -47,7 +61,23 @@ export function parseListStructure(markdown: string): ListStructure {
 
 export function validateListPolish(canonical: string, polished: string): ListPolishValidation {
 	const canonicalStructure = parseListStructure(canonical);
-	const polishedStructure = parseListStructure(polished);
+	const sanitizedPolished = sanitizeListPolishCandidate(polished);
+	const polishedStructure = parseListStructure(sanitizedPolished);
+
+	const normalizedLines = sanitizedPolished.replace(/\r\n/g, '\n').split('\n');
+	const firstNonEmpty = normalizedLines.find((line) => line.trim().length > 0)?.trim();
+	if (!firstNonEmpty) {
+		return { ok: false, reason: 'polished output is empty' };
+	}
+	if (/^```/.test(firstNonEmpty)) {
+		return { ok: false, reason: 'polished output must not contain fenced code wrappers' };
+	}
+	if (!/^#\s+/.test(firstNonEmpty)) {
+		return { ok: false, reason: 'polished output must start at a main section heading (# ...)' };
+	}
+	if (!isStrictListMarkdownShape(normalizedLines)) {
+		return { ok: false, reason: 'polished output contains non-list prose or unsupported wrapper text' };
+	}
 
 	if (canonicalStructure.sections.length === 0) {
 		return { ok: false, reason: 'canonical output has no main sections' };
@@ -80,4 +110,37 @@ export function validateListPolish(canonical: string, polished: string): ListPol
 	}
 
 	return { ok: true };
+}
+
+function isStrictListMarkdownShape(lines: string[]): boolean {
+	let seenMainSection = false;
+
+	for (const raw of lines) {
+		const line = raw.trim();
+		if (!line) {
+			continue;
+		}
+		if (/^```/.test(line)) {
+			return false;
+		}
+		if (/^#\s+/.test(line)) {
+			seenMainSection = true;
+			continue;
+		}
+		if (!seenMainSection) {
+			return false;
+		}
+		if (/^##+\s+/.test(line)) {
+			continue;
+		}
+		if (/^[-*]\s+/.test(line) || /^\d+\.\s+/.test(line)) {
+			continue;
+		}
+		if (line === '---' || line === '***') {
+			continue;
+		}
+		return false;
+	}
+
+	return true;
 }

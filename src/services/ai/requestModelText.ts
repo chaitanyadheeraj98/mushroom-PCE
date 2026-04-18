@@ -1,10 +1,19 @@
 import * as vscode from 'vscode';
 
+export type RequestModelTextOptions = {
+	onChunk?: (chunk: string) => void;
+	signal?: AbortSignal;
+};
+
 export async function requestModelText(
 	model: vscode.LanguageModelChat,
 	prompt: string,
-	onChunk?: (chunk: string) => void
+	options?: RequestModelTextOptions
 ): Promise<string | undefined> {
+	if (options?.signal?.aborted) {
+		throw new Error(String(options.signal.reason ?? 'Request cancelled'));
+	}
+
 	const messages = [new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, prompt)];
 	const response = await model.sendRequest(messages);
 	const res: any = response;
@@ -13,10 +22,13 @@ export async function requestModelText(
 	if (streamCandidate && typeof streamCandidate[Symbol.asyncIterator] === 'function') {
 		let text = '';
 		for await (const chunk of streamCandidate) {
+			if (options?.signal?.aborted) {
+				throw new Error(String(options.signal.reason ?? 'Request cancelled'));
+			}
 			const parsedChunk = extractTextFromChunk(chunk);
 			if (parsedChunk) {
 				text += parsedChunk;
-				onChunk?.(parsedChunk);
+				options?.onChunk?.(parsedChunk);
 			}
 		}
 		return text;

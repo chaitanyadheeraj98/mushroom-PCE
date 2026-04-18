@@ -63,7 +63,7 @@ function buildTypeScriptConceptOutput(document: vscode.TextDocument): string {
 	);
 	const strippedCode = stripStringLikeLiterals(code, sourceFile);
 	const concepts = collectTypeScriptConcepts(sourceFile, code, strippedCode);
-	return renderConcepts(concepts, document);
+	return renderConcepts(concepts);
 }
 
 function collectTypeScriptConcepts(sourceFile: ts.SourceFile, code: string, strippedCode: string): TypeScriptConcepts {
@@ -942,12 +942,8 @@ function renderAdvancedConcepts(code: string, advanced: string[], concepts: Type
 	}
 }
 
-function renderConcepts(concepts: TypeScriptConcepts, document: vscode.TextDocument): string {
-	const blocks: string[] = [
-		'Here is a **strict structured extraction** of the active file.',
-		`File: \`${vscode.workspace.asRelativePath(document.uri, false).replace(/\\/g, '/')}\``,
-		''
-	];
+function renderConcepts(concepts: TypeScriptConcepts): string {
+	const blocks: string[] = [];
 
 	pushSection(blocks, 'IMPORTS', concepts.imports);
 	pushSection(blocks, 'EXPORTS', concepts.exports);
@@ -977,7 +973,10 @@ function renderConcepts(concepts: TypeScriptConcepts, document: vscode.TextDocum
 }
 
 function pushSection(blocks: string[], heading: string, items: string[]): void {
-	blocks.push(`---\n\n# ${heading}\n`);
+	if (blocks.length) {
+		blocks.push('---', '');
+	}
+	blocks.push(`# ${heading}`, '');
 	if (!items.length) {
 		blocks.push(EMPTY, '');
 		return;
@@ -989,7 +988,10 @@ function pushSection(blocks: string[], heading: string, items: string[]): void {
 }
 
 function pushClassProperties(blocks: string[], classes: ClassInfo[]): void {
-	blocks.push('---\n\n# CLASS PROPERTIES\n');
+	if (blocks.length) {
+		blocks.push('---', '');
+	}
+	blocks.push('# CLASS PROPERTIES', '');
 	if (!classes.length || classes.every((item) => allClassPropertyGroupsEmpty(item.members))) {
 		blocks.push(EMPTY, '');
 		return;
@@ -1005,7 +1007,10 @@ function pushClassProperties(blocks: string[], classes: ClassInfo[]): void {
 }
 
 function pushMethods(blocks: string[], classes: ClassInfo[], functions: string[]): void {
-	blocks.push('---\n\n# FUNCTIONS / METHODS\n');
+	if (blocks.length) {
+		blocks.push('---', '');
+	}
+	blocks.push('# FUNCTIONS / METHODS', '');
 	let hasAny = false;
 	for (const item of classes) {
 		if (
@@ -1031,7 +1036,10 @@ function pushMethods(blocks: string[], classes: ClassInfo[], functions: string[]
 }
 
 function pushObjectsSection(blocks: string[], concepts: TypeScriptConcepts): void {
-	blocks.push('---\n\n# OBJECTS / DATA STRUCTURES\n');
+	if (blocks.length) {
+		blocks.push('---', '');
+	}
+	blocks.push('# OBJECTS / DATA STRUCTURES', '');
 	if (!concepts.objects.length && !concepts.messagePayloads.length) {
 		blocks.push(EMPTY, '');
 		return;
@@ -1140,7 +1148,7 @@ function buildGenericConceptOutput(document: vscode.TextDocument): string {
 	if (/\basync\b|\bawait\b|Promise/.test(code)) {
 		concepts.asyncConcepts.push('async/concurrency syntax');
 	}
-	return renderConcepts(concepts, document);
+	return renderConcepts(concepts);
 }
 
 function collectRegexMatches(code: string, regex: RegExp): string[] {
