@@ -5,15 +5,19 @@ import { requestModelText } from '../services/ai/requestModelText';
 import { buildListModeOutput } from '../services/analysis/buildListModeOutput';
 import { ListModeVariant, runListModePipeline } from '../services/analysis/listModePipeline';
 import { buildNodeDetailsPrompt, buildPrompt } from '../services/prompts/buildPrompt';
+import { BlueprintPanel } from '../controllers/blueprint/BlueprintPanelController';
 import { MushroomPanel } from '../controllers/mushroom/MushroomPanelController';
 import { parseSymbolLocations } from '../services/symbols/parseSymbolLocations';
 import { ResponseMode, SymbolLink } from '../shared/types/appTypes';
-import { NodeChatRequest } from '../controllers/circuit/CircuitDetailsPanelController';
+import { CircuitDetailsPanel, NodeChatRequest } from '../controllers/circuit/CircuitDetailsPanelController';
 import { detectLanguageMismatchWarning } from '../services/language/detectLanguageWarning';
 import { registerPceCommands } from '../commands/registerCommands';
 import { enrichCircuitGraphWithAi } from '../services/circuit/ai/enrichCircuitGraph';
 import { CircuitAiEnrichmentResult, CircuitGraph } from '../shared/types/circuitTypes';
 import { explainCircuitNodeRelationWithAi } from '../services/circuit/ai/explainNodeRelation';
+import { askBlueprintChat, BlueprintPlanResult, generateBlueprintPlan } from '../services/blueprint/buildBlueprintPlan';
+import { scanSrcWorkspaceSnapshot } from '../services/blueprint/scanWorkspaceBlueprint';
+import { CircuitPanel } from '../controllers/circuit/CircuitPanelController';
 
 export function activateApp(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
@@ -35,7 +39,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 		laneLimits: {
 			analysis: 1,
 			'node-chat': 1,
-			'circuit-ai': 1
+			'circuit-ai': 1,
+			blueprint: 1
 		}
 	});
 
@@ -434,6 +439,94 @@ export function activateApp(context: vscode.ExtensionContext) {
 		});
 	};
 
+	const openBlueprintPanel = async (): Promise<void> => {
+		BlueprintPanel.createOrShow(
+			async (request) =>
+				aiJobs.schedule<BlueprintPlanResult>({
+					lane: 'blueprint',
+					group: 'blueprint:generate',
+					supersedeGroup: true,
+					priority: 70,
+					run: async (signal) => {
+						await loadModels();
+						if (signal.aborted) {
+							throw new AiJobCancelledError(String(signal.reason ?? 'Cancelled'));
+						}
+						const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+						if (!model) {
+							throw new Error('No AI model is currently available for Blueprint.');
+						}
+						const workspace = await scanSrcWorkspaceSnapshot();
+						if (!workspace) {
+							throw new Error('Could not scan src/. Open a workspace with a src folder and try again.');
+						}
+						return generateBlueprintPlan(model, request.featureRequest, workspace, request.history, signal);
+					}
+				}),
+			async (request, plan) =>
+				aiJobs.schedule<string>({
+					lane: 'blueprint',
+					group: 'blueprint:chat',
+					priority: 65,
+					run: async (signal) => {
+						await loadModels();
+						if (signal.aborted) {
+							throw new AiJobCancelledError(String(signal.reason ?? 'Cancelled'));
+						}
+						const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+						if (!model) {
+							return 'No AI model is currently available for Blueprint chat.';
+						}
+						const workspace = await scanSrcWorkspaceSnapshot();
+						if (!workspace) {
+							return 'Could not scan src/. Open a workspace with a src folder and try again.';
+						}
+						return askBlueprintChat(model, request.question, plan, workspace, request.history, signal);
+					}
+				}),
+			async (plan) => {
+				if (!plan) {
+					return {
+						approved: false,
+						message: 'No blueprint to apply yet. Generate a plan first.'
+					};
+				}
+				const choice = await vscode.window.showWarningMessage(
+					'Apply Blueprint now? This is a confirmation-only step. No files are changed automatically.',
+					{ modal: true },
+					'Apply Blueprint'
+				);
+				if (choice !== 'Apply Blueprint') {
+					return {
+						approved: false,
+						message: 'Apply cancelled. Blueprint remains in plan-only mode.'
+					};
+				}
+				return {
+					approved: true,
+					message: 'Blueprint confirmed. Plan-only mode complete. No code changes were applied automatically.'
+				};
+			},
+			async (plan) => {
+				if (!plan?.graph) {
+					vscode.window.showInformationMessage('Generate a blueprint first, then open it in Circuit.');
+					return;
+				}
+				CircuitPanel.createOrShow(
+					context.extensionUri,
+					plan.graph,
+					async (node, currentGraph) => {
+						await CircuitDetailsPanel.createOrShow(node, currentGraph, askNodeQuestion);
+					},
+					undefined,
+					async (_scope, currentGraph) => currentGraph,
+					async (currentGraph) => requestCircuitAiEnrichment(currentGraph),
+					async (currentGraph, fromNodeId, toNodeId) => requestCircuitRelationExplain(currentGraph, fromNodeId, toNodeId)
+				);
+			}
+		);
+	};
+
 	const commandDisposables = registerPceCommands({
 		extensionUri: context.extensionUri,
 		output,
@@ -459,7 +552,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 		runAnalysis,
 		askNodeQuestion,
 		requestCircuitAiEnrichment,
-		requestCircuitRelationExplain
+		requestCircuitRelationExplain,
+		openBlueprintPanel
 	});
 
 	const statusBarAnalyze = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);

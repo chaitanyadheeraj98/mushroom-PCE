@@ -30,6 +30,7 @@ type RegisterCommandsDeps = {
 	askNodeQuestion: (request: NodeChatRequest) => Promise<string>;
 	requestCircuitAiEnrichment: (graph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>;
 	requestCircuitRelationExplain: (graph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>;
+	openBlueprintPanel: () => Promise<void>;
 };
 
 export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposable[] {
@@ -197,6 +198,10 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		);
 	});
 
+	const openBlueprintCommand = vscode.commands.registerCommand('mushroom-pce.openBlueprint', async () => {
+		await deps.openBlueprintPanel();
+	});
+
 	return [
 		startCommand,
 		analyzeCommand,
@@ -204,7 +209,8 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		setListModeCommand,
 		setDeveloperModeCommand,
 		goToFunctionCommand,
-		openCircuitCommand
+		openCircuitCommand,
+		openBlueprintCommand
 	];
 }
 

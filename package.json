@@ -16,7 +16,8 @@
     "onCommand:mushroom-pce.goToFunction",
     "onCommand:mushroom-pce.setListMode",
     "onCommand:mushroom-pce.setDeveloperMode",
-    "onCommand:mushroom-pce.openCircuit"
+    "onCommand:mushroom-pce.openCircuit",
+    "onCommand:mushroom-pce.openBlueprint"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -48,6 +49,10 @@
       {
         "command": "mushroom-pce.openCircuit",
         "title": "Mushroom PCE: Open Circuit Mode"
+      },
+      {
+        "command": "mushroom-pce.openBlueprint",
+        "title": "Mushroom PCE: Open Blueprint"
       }
     ]
   },
