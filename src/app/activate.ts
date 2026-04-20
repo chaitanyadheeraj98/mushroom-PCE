@@ -1,4 +1,5 @@
-﻿import * as vscode from 'vscode';
+import * as vscode from 'vscode';
+import * as path from 'path';
 
 import { AiJobCancelledError, AiJobOrchestrator, isAiJobCancelledError } from '../services/ai/aiJobOrchestrator';
 import { requestModelText } from '../services/ai/requestModelText';
@@ -15,9 +16,13 @@ import { registerPceCommands } from '../commands/registerCommands';
 import { enrichCircuitGraphWithAi } from '../services/circuit/ai/enrichCircuitGraph';
 import { CircuitAiEnrichmentResult, CircuitGraph } from '../shared/types/circuitTypes';
 import { explainCircuitNodeRelationWithAi } from '../services/circuit/ai/explainNodeRelation';
-import { askBlueprintChat, BlueprintPlanResult, generateBlueprintPlan } from '../services/blueprint/buildBlueprintPlan';
+import {
+	BlueprintConversationTurn,
+	BlueprintPlanningArtifacts,
+	continueBlueprintPlanningTurn,
+	generateBlueprintPlanningArtifacts
+} from '../services/blueprint/generateBlueprintCode';
 import { scanSrcWorkspaceSnapshot } from '../services/blueprint/scanWorkspaceBlueprint';
-import { CircuitPanel } from '../controllers/circuit/CircuitPanelController';
 
 export function activateApp(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
@@ -442,9 +447,9 @@ export function activateApp(context: vscode.ExtensionContext) {
 	const openBlueprintPanel = async (): Promise<void> => {
 		BlueprintPanel.createOrShow(
 			async (request) =>
-				aiJobs.schedule<BlueprintPlanResult>({
+				aiJobs.schedule({
 					lane: 'blueprint',
-					group: 'blueprint:generate',
+					group: 'blueprint:chat',
 					supersedeGroup: true,
 					priority: 70,
 					run: async (signal) => {
@@ -454,20 +459,25 @@ export function activateApp(context: vscode.ExtensionContext) {
 						}
 						const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
 						if (!model) {
-							throw new Error('No AI model is currently available for Blueprint.');
+							throw new Error('No AI model is currently available for Blueprint planner chat.');
 						}
 						const workspace = await scanSrcWorkspaceSnapshot();
-						if (!workspace) {
-							throw new Error('Could not scan src/. Open a workspace with a src folder and try again.');
-						}
-						return generateBlueprintPlan(model, request.featureRequest, workspace, request.history, signal);
+						const reply = await continueBlueprintPlanningTurn(
+							model,
+							request.userMessage,
+							request.history as BlueprintConversationTurn[],
+							workspace,
+							signal
+						);
+						return reply;
 					}
 				}),
-			async (request, plan) =>
-				aiJobs.schedule<string>({
+			async (history) =>
+				aiJobs.schedule({
 					lane: 'blueprint',
-					group: 'blueprint:chat',
-					priority: 65,
+					group: 'blueprint:generate',
+					supersedeGroup: true,
+					priority: 80,
 					run: async (signal) => {
 						await loadModels();
 						if (signal.aborted) {
@@ -475,54 +485,71 @@ export function activateApp(context: vscode.ExtensionContext) {
 						}
 						const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
 						if (!model) {
-							return 'No AI model is currently available for Blueprint chat.';
+							throw new Error('No AI model is currently available for Blueprint generation.');
 						}
 						const workspace = await scanSrcWorkspaceSnapshot();
-						if (!workspace) {
-							return 'Could not scan src/. Open a workspace with a src folder and try again.';
-						}
-						return askBlueprintChat(model, request.question, plan, workspace, request.history, signal);
+						const artifacts = await generateBlueprintPlanningArtifacts(
+							model,
+							history as BlueprintConversationTurn[],
+							workspace,
+							signal
+						);
+						vscode.window.showInformationMessage('Blueprint prompt artifacts generated.');
+						return artifacts;
 					}
 				}),
-			async (plan) => {
-				if (!plan) {
+			async (artifacts) => {
+				if (!artifacts) {
 					return {
-						approved: false,
-						message: 'No blueprint to apply yet. Generate a plan first.'
+						saved: false,
+						message: 'No generated artifacts found. Click Generate first.'
 					};
 				}
-				const choice = await vscode.window.showWarningMessage(
-					'Apply Blueprint now? This is a confirmation-only step. No files are changed automatically.',
+				const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+				if (!workspaceFolder) {
+					return {
+						saved: false,
+						message: 'No workspace folder is open.'
+					};
+				}
+
+				const chosen = await vscode.window.showWarningMessage(
+					'Save Blueprint spec + prompt into docs/feature-plans now?',
 					{ modal: true },
-					'Apply Blueprint'
+					'Save Spec'
 				);
-				if (choice !== 'Apply Blueprint') {
+				if (chosen !== 'Save Spec') {
 					return {
-						approved: false,
-						message: 'Apply cancelled. Blueprint remains in plan-only mode.'
+						saved: false,
+						message: 'Save cancelled.'
 					};
 				}
-				return {
-					approved: true,
-					message: 'Blueprint confirmed. Plan-only mode complete. No code changes were applied automatically.'
-				};
-			},
-			async (plan) => {
-				if (!plan?.graph) {
-					vscode.window.showInformationMessage('Generate a blueprint first, then open it in Circuit.');
-					return;
+
+				const fileName = makeBlueprintSpecFileName(artifacts);
+				const targetUri = vscode.Uri.joinPath(workspaceFolder.uri, 'docs', 'feature-plans', fileName);
+				const workspaceFsPath = path.resolve(workspaceFolder.uri.fsPath);
+				const targetFsPath = path.resolve(targetUri.fsPath);
+				if (!targetFsPath.toLowerCase().startsWith(workspaceFsPath.toLowerCase())) {
+					return {
+						saved: false,
+						message: 'Blocked path traversal while saving blueprint spec.'
+					};
 				}
-				CircuitPanel.createOrShow(
-					context.extensionUri,
-					plan.graph,
-					async (node, currentGraph) => {
-						await CircuitDetailsPanel.createOrShow(node, currentGraph, askNodeQuestion);
-					},
-					undefined,
-					async (_scope, currentGraph) => currentGraph,
-					async (currentGraph) => requestCircuitAiEnrichment(currentGraph),
-					async (currentGraph, fromNodeId, toNodeId) => requestCircuitRelationExplain(currentGraph, fromNodeId, toNodeId)
-				);
+
+				const parentUri = vscode.Uri.joinPath(workspaceFolder.uri, 'docs', 'feature-plans');
+				try {
+					await vscode.workspace.fs.createDirectory(parentUri);
+				} catch {
+					// Directory already exists.
+				}
+				const content = renderBlueprintSpecMarkdown(artifacts);
+				await vscode.workspace.fs.writeFile(targetUri, new TextEncoder().encode(content));
+				vscode.window.showInformationMessage(`Blueprint spec saved: docs/feature-plans/${fileName}`);
+				return {
+					saved: true,
+					path: `docs/feature-plans/${fileName}`,
+					message: `Saved blueprint spec to docs/feature-plans/${fileName}`
+				};
 			}
 		);
 	};
@@ -596,6 +623,36 @@ export function activateApp(context: vscode.ExtensionContext) {
 	);
 }
 
+function makeBlueprintSpecFileName(artifacts: BlueprintPlanningArtifacts): string {
+	const slug = String(artifacts.featureName || 'feature-plan')
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 64) || 'feature-plan';
+	const stamp = new Date(artifacts.generatedAt || Date.now()).toISOString().replace(/[:.]/g, '-');
+	return `${slug}-${stamp}.md`;
+}
+
+function renderBlueprintSpecMarkdown(artifacts: BlueprintPlanningArtifacts): string {
+	return [
+		`# ${artifacts.featureName} Blueprint Spec`,
+		'',
+		`Generated: ${new Date(artifacts.generatedAt).toISOString()}`,
+		`Model: ${artifacts.modelLabel ?? 'unknown'}`,
+		'',
+		'## JSON Spec',
+		'```json',
+		JSON.stringify(artifacts.spec, null, 2),
+		'```',
+		'',
+		'## Prompt',
+		'```text',
+		String(artifacts.prompt || ''),
+		'```',
+		''
+	].join('\n');
+}
+
 
 async function explainCode(
 	model: vscode.LanguageModelChat,
@@ -613,4 +670,5 @@ async function explainCode(
 		return;
 	}
 }
+
 

@@ -1,22 +1,23 @@
 import * as vscode from 'vscode';
 
-import { CircuitGraph } from '../../shared/types/circuitTypes';
-import { BlueprintPlanResult } from '../../services/blueprint/buildBlueprintPlan';
+import {
+	BlueprintPlanningArtifacts,
+	BlueprintPlannerAssistantTurn
+} from '../../services/blueprint/generateBlueprintCode';
 
-type ChatTurn = { role: 'user' | 'assistant'; text: string };
-
-type GenerateRequest = {
-	featureRequest: string;
-	history: ChatTurn[];
+type BlueprintChatTurn = {
+	role: 'user' | 'assistant';
+	text: string;
 };
 
-type AskRequest = {
-	question: string;
-	history: ChatTurn[];
+type HandleUserTurnRequest = {
+	userMessage: string;
+	history: BlueprintChatTurn[];
 };
 
-type ApplyResult = {
-	approved: boolean;
+type SaveResult = {
+	saved: boolean;
+	path?: string;
 	message: string;
 };
 
@@ -24,17 +25,15 @@ export class BlueprintPanel {
 	private static currentPanel: BlueprintPanel | undefined;
 	private readonly panel: vscode.WebviewPanel;
 	private readonly disposables: vscode.Disposable[] = [];
-	private readonly onGenerate: (request: GenerateRequest) => Promise<BlueprintPlanResult | undefined>;
-	private readonly onAsk: (request: AskRequest, plan: BlueprintPlanResult | undefined) => Promise<string>;
-	private readonly onApply: (plan: BlueprintPlanResult | undefined) => Promise<ApplyResult>;
-	private readonly onOpenCircuit: (plan: BlueprintPlanResult | undefined) => Promise<void>;
-	private currentPlan: BlueprintPlanResult | undefined;
+	private readonly onUserTurn: (request: HandleUserTurnRequest) => Promise<BlueprintPlannerAssistantTurn>;
+	private readonly onGenerateArtifacts: (history: BlueprintChatTurn[]) => Promise<BlueprintPlanningArtifacts>;
+	private readonly onSaveArtifacts: (artifacts: BlueprintPlanningArtifacts | undefined) => Promise<SaveResult>;
+	private latestArtifacts: BlueprintPlanningArtifacts | undefined;
 
 	static createOrShow(
-		onGenerate: (request: GenerateRequest) => Promise<BlueprintPlanResult | undefined>,
-		onAsk: (request: AskRequest, plan: BlueprintPlanResult | undefined) => Promise<string>,
-		onApply: (plan: BlueprintPlanResult | undefined) => Promise<ApplyResult>,
-		onOpenCircuit: (plan: BlueprintPlanResult | undefined) => Promise<void>
+		onUserTurn: (request: HandleUserTurnRequest) => Promise<BlueprintPlannerAssistantTurn>,
+		onGenerateArtifacts: (history: BlueprintChatTurn[]) => Promise<BlueprintPlanningArtifacts>,
+		onSaveArtifacts: (artifacts: BlueprintPlanningArtifacts | undefined) => Promise<SaveResult>
 	): BlueprintPanel {
 		if (BlueprintPanel.currentPanel) {
 			BlueprintPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
@@ -43,7 +42,7 @@ export class BlueprintPanel {
 
 		const panel = vscode.window.createWebviewPanel(
 			'mushroomPceBlueprint',
-			'Mushroom PCE: Blueprint',
+			'Mushroom PCE: Blueprint Planner',
 			vscode.ViewColumn.Beside,
 			{
 				enableScripts: true,
@@ -51,51 +50,43 @@ export class BlueprintPanel {
 			}
 		);
 
-		BlueprintPanel.currentPanel = new BlueprintPanel(panel, onGenerate, onAsk, onApply, onOpenCircuit);
+		BlueprintPanel.currentPanel = new BlueprintPanel(panel, onUserTurn, onGenerateArtifacts, onSaveArtifacts);
 		return BlueprintPanel.currentPanel;
 	}
 
 	private constructor(
 		panel: vscode.WebviewPanel,
-		onGenerate: (request: GenerateRequest) => Promise<BlueprintPlanResult | undefined>,
-		onAsk: (request: AskRequest, plan: BlueprintPlanResult | undefined) => Promise<string>,
-		onApply: (plan: BlueprintPlanResult | undefined) => Promise<ApplyResult>,
-		onOpenCircuit: (plan: BlueprintPlanResult | undefined) => Promise<void>
+		onUserTurn: (request: HandleUserTurnRequest) => Promise<BlueprintPlannerAssistantTurn>,
+		onGenerateArtifacts: (history: BlueprintChatTurn[]) => Promise<BlueprintPlanningArtifacts>,
+		onSaveArtifacts: (artifacts: BlueprintPlanningArtifacts | undefined) => Promise<SaveResult>
 	) {
 		this.panel = panel;
-		this.onGenerate = onGenerate;
-		this.onAsk = onAsk;
-		this.onApply = onApply;
-		this.onOpenCircuit = onOpenCircuit;
+		this.onUserTurn = onUserTurn;
+		this.onGenerateArtifacts = onGenerateArtifacts;
+		this.onSaveArtifacts = onSaveArtifacts;
 
 		this.panel.webview.html = this.getHtml();
 		this.panel.webview.onDidReceiveMessage(
 			async (msg) => {
-				if (msg?.type === 'generateBlueprint') {
-					await this.handleGenerate({
-						featureRequest: String(msg?.featureRequest ?? ''),
-						history: Array.isArray(msg?.history) ? msg.history : []
+				if (msg?.type === 'blueprintUserTurn') {
+					await this.handleUserTurn({
+						userMessage: String(msg?.userMessage || ''),
+						history: normalizeHistory(msg?.history)
 					});
 					return;
 				}
-				if (msg?.type === 'askBlueprint') {
-					await this.handleAsk({
-						question: String(msg?.question ?? ''),
-						history: Array.isArray(msg?.history) ? msg.history : []
-					});
+				if (msg?.type === 'blueprintGeneratePrompt') {
+					await this.handleGenerateArtifacts(normalizeHistory(msg?.history));
 					return;
 				}
-				if (msg?.type === 'applyBlueprint') {
-					await this.handleApply();
-					return;
-				}
-				if (msg?.type === 'openBlueprintCircuit') {
-					await this.handleOpenCircuit();
+				if (msg?.type === 'blueprintSavePromptArtifacts') {
+					await this.handleSaveArtifacts();
 				}
 			},
 			null,
 			this.disposables
 		);
+
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 	}
 
@@ -108,59 +99,51 @@ export class BlueprintPanel {
 		}
 	}
 
-	private async handleGenerate(request: GenerateRequest): Promise<void> {
+	private async handleUserTurn(request: HandleUserTurnRequest): Promise<void> {
 		try {
-			const plan = await this.onGenerate(request);
-			this.currentPlan = plan;
+			const result = await this.onUserTurn(request);
 			this.panel.webview.postMessage({
-				type: 'blueprintGenerated',
-				plan
-			});
-		} catch (error: any) {
-			this.panel.webview.postMessage({
-				type: 'blueprintGenerated',
-				error: error?.message ?? String(error)
-			});
-		}
-	}
-
-	private async handleAsk(request: AskRequest): Promise<void> {
-		try {
-			const answer = await this.onAsk(request, this.currentPlan);
-			this.panel.webview.postMessage({
-				type: 'blueprintAnswered',
-				answer
-			});
-		} catch (error: any) {
-			this.panel.webview.postMessage({
-				type: 'blueprintAnswered',
-				error: error?.message ?? String(error)
-			});
-		}
-	}
-
-	private async handleApply(): Promise<void> {
-		try {
-			const result = await this.onApply(this.currentPlan);
-			this.panel.webview.postMessage({
-				type: 'blueprintApplied',
+				type: 'blueprintAssistantTurn',
 				result
 			});
 		} catch (error: any) {
 			this.panel.webview.postMessage({
-				type: 'blueprintApplied',
-				result: { approved: false, message: error?.message ?? String(error) }
+				type: 'blueprintAssistantTurn',
+				error: error?.message ?? String(error)
 			});
 		}
 	}
 
-	private async handleOpenCircuit(): Promise<void> {
+	private async handleGenerateArtifacts(history: BlueprintChatTurn[]): Promise<void> {
 		try {
-			await this.onOpenCircuit(this.currentPlan);
+			const artifacts = await this.onGenerateArtifacts(history);
+			this.latestArtifacts = artifacts;
+			this.panel.webview.postMessage({
+				type: 'blueprintPromptGenerated',
+				artifacts
+			});
 		} catch (error: any) {
 			this.panel.webview.postMessage({
-				type: 'blueprintOpenedCircuit',
+				type: 'blueprintPromptGenerated',
 				error: error?.message ?? String(error)
+			});
+		}
+	}
+
+	private async handleSaveArtifacts(): Promise<void> {
+		try {
+			const result = await this.onSaveArtifacts(this.latestArtifacts);
+			this.panel.webview.postMessage({
+				type: 'blueprintPromptSaved',
+				result
+			});
+		} catch (error: any) {
+			this.panel.webview.postMessage({
+				type: 'blueprintPromptSaved',
+				result: {
+					saved: false,
+					message: error?.message ?? String(error)
+				}
 			});
 		}
 	}
@@ -174,288 +157,550 @@ export class BlueprintPanel {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${csp} 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Blueprint</title>
+  <title>Blueprint Planner</title>
   <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #0f172a;
+      --line: #21304d;
+      --muted: #9fb0cc;
+      --text: #e2e8f0;
+      --accent: #22c55e;
+      --accent-2: #16a34a;
+      --danger: #ef4444;
+      --code-bg: #0b1225;
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; }
     body {
       margin: 0;
-      padding: 12px;
-      font-family: Segoe UI, Tahoma, sans-serif;
-      color: #e2e8f0;
-      background: radial-gradient(circle at top right, #1e293b, #0b1020 58%);
+      background: radial-gradient(circle at top right, #1e293b, var(--bg) 55%);
+      color: var(--text);
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      min-height: 100dvh;
+      overflow: auto;
     }
-    .wrap {
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(360px, var(--left-width, 62%)) 8px minmax(300px, 1fr);
+      gap: 10px;
+      padding: 12px;
+      height: 100%;
+      min-height: 0;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: color-mix(in oklab, var(--panel) 94%, black);
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      height: calc(100vh - 24px);
+      min-height: 0;
+      overflow: hidden;
     }
-    .card {
-      border: 1px solid #243553;
-      border-radius: 10px;
-      background: rgba(11, 18, 37, 0.9);
-      padding: 10px;
-    }
-    .title {
-      font-size: 16px;
-      font-weight: 700;
-      margin-bottom: 6px;
-    }
-    .muted {
-      color: #a8bbd9;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-    .row {
+    .header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
       display: flex;
-      gap: 8px;
+      justify-content: space-between;
       align-items: center;
-      margin-top: 8px;
+      gap: 10px;
     }
-    textarea {
-      width: 100%;
-      min-height: 76px;
-      max-height: 220px;
-      resize: vertical;
-      border: 1px solid #2f456b;
-      border-radius: 8px;
-      padding: 8px;
-      background: #0b1225;
-      color: #e2e8f0;
-      font-family: Segoe UI, Tahoma, sans-serif;
-      font-size: 13px;
-      box-sizing: border-box;
+    .header-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
     }
-    button {
-      border: 1px solid #2f456b;
-      border-radius: 8px;
-      padding: 7px 10px;
-      background: rgba(15, 32, 62, 0.85);
-      color: #e2e8f0;
-      font-size: 12px;
-      font-weight: 600;
+    .title { font-size: 14px; font-weight: 700; letter-spacing: 0; }
+    .status { font-size: 12px; color: var(--muted); min-height: 16px; }
+    .icon-btn {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      width: 26px;
+      height: 26px;
+      min-width: 26px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #13203b;
+      color: #d6e7ff;
       cursor: pointer;
-    }
-    button.primary {
-      border-color: rgba(34, 197, 94, 0.8);
-      background: rgba(22, 163, 74, 0.25);
-      color: #dcfce7;
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: default;
-    }
-    .status {
-      color: #9fb4d7;
-      font-size: 12px;
-      margin-top: 6px;
-      min-height: 16px;
-    }
-    #explanationPane {
-      min-height: 130px;
-      max-height: 55vh;
-      resize: vertical;
-      overflow: auto;
-      border: 1px solid #2f456b;
-      border-radius: 8px;
-      padding: 9px;
-      background: rgba(9, 18, 38, 0.9);
-      line-height: 1.5;
-      font-size: 12px;
-      white-space: pre-wrap;
-    }
-    #nodesList {
-      margin: 8px 0 0 16px;
+      font-size: 13px;
       padding: 0;
-      font-size: 12px;
-      line-height: 1.45;
-      max-height: 160px;
-      overflow: auto;
+      line-height: 1;
     }
-    .chat-log {
-      border: 1px solid #2f456b;
-      border-radius: 8px;
-      background: rgba(9, 18, 38, 0.9);
-      padding: 8px;
-      max-height: 220px;
+    .icon-btn:hover {
+      border-color: color-mix(in oklab, #5fb3ff 42%, var(--line));
+      background: color-mix(in oklab, #5fb3ff 18%, #13203b);
+    }
+    .chat {
+      flex: 1;
+      min-height: 220px;
       overflow: auto;
+      padding: 10px;
       display: grid;
       gap: 8px;
     }
     .bubble {
+      border: 1px solid var(--line);
       border-radius: 8px;
-      border: 1px solid #2f456b;
-      padding: 7px 8px;
+      padding: 9px 10px;
       font-size: 12px;
       line-height: 1.45;
       white-space: pre-wrap;
+      word-break: break-word;
     }
     .bubble.user {
-      background: rgba(34, 197, 94, 0.14);
+      justify-self: end;
+      width: min(88%, 680px);
+      background: color-mix(in oklab, #22c55e 18%, var(--panel));
+      border-color: color-mix(in oklab, #22c55e 55%, var(--line));
     }
     .bubble.assistant {
-      background: rgba(59, 130, 246, 0.12);
+      justify-self: start;
+      width: min(94%, 760px);
+      background: color-mix(in oklab, #93c5fd 8%, var(--panel));
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-line;
+    }
+    .composer {
+      border-top: 1px solid var(--line);
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--text);
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      font-size: 12px;
+      line-height: 1.35;
+      padding: 9px;
+      min-height: 80px;
+      max-height: 180px;
+      resize: vertical;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    button {
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #13203b;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: color-mix(in oklab, var(--accent) 55%, white);
+      background: color-mix(in oklab, var(--accent-2) 70%, #0f172a);
+    }
+    button.warn {
+      border-color: color-mix(in oklab, var(--danger) 60%, white);
+      background: color-mix(in oklab, var(--danger) 36%, #0f172a);
+    }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .meta {
+      font-size: 11px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      min-height: 32px;
+      padding: 8px 10px;
+      border-top: 1px solid color-mix(in oklab, var(--line) 80%, black);
+    }
+    .right-wrap {
+      display: grid;
+      grid-template-rows: minmax(160px, var(--top-height, 50%)) 8px minmax(180px, 1fr);
+      gap: 10px;
+      min-height: 0;
+    }
+    .resizer {
+      border-radius: 6px;
+      background: color-mix(in oklab, var(--line) 85%, #5d7ba8);
+      opacity: 0.85;
+      transition: opacity 120ms ease, background-color 120ms ease;
+    }
+    .resizer:hover {
+      opacity: 1;
+      background: color-mix(in oklab, #5fb3ff 40%, var(--line));
+    }
+    .resizer.col {
+      cursor: col-resize;
+      width: 8px;
+      min-width: 8px;
+      height: 100%;
+    }
+    .resizer.row {
+      cursor: row-resize;
+      width: 100%;
+      min-height: 8px;
+      height: 8px;
+    }
+    pre {
+      margin: 0;
+      padding: 10px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #dbe7fb;
+      background: var(--code-bg);
+      border-top: 1px solid var(--line);
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      flex: 1;
+      min-height: 0;
+    }
+    .artifact-head {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 18px;
+      white-space: pre-wrap;
+    }
+    @media (max-width: 1180px) {
+      .layout {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(360px, 1fr) minmax(320px, 1fr);
+        height: 100%;
+      }
+      .resizer.col {
+        display: none;
+      }
+      .right-wrap {
+        grid-template-rows: minmax(180px, 1fr) 8px minmax(180px, 1fr);
+      }
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <div class="title">Blueprint</div>
-      <div class="muted">Plan-only feature implementation mode. Scans src/ structure, proposes reusable nodes, new nodes, tests, and risks.</div>
-      <textarea id="featureRequest" placeholder="Describe the new feature to implement..."></textarea>
-      <div class="row">
-        <button id="generateBtn" class="primary">Generate Blueprint</button>
-        <button id="openCircuitBtn">Open In Circuit</button>
-        <button id="applyBtn">Apply Blueprint</button>
+  <div class="layout">
+    <section class="panel" id="chatPanel">
+      <div class="header">
+        <div class="title">Blueprint Planner Chat</div>
+        <div class="header-tools">
+          <button id="copyChatBtn" class="icon-btn" title="Copy chat transcript" aria-label="Copy chat transcript">⧉</button>
+          <div id="status" class="status">Start by describing the feature. I will ask implementation questions.</div>
+        </div>
       </div>
-      <div id="status" class="status">Ready</div>
-    </div>
+      <div id="chat" class="chat"></div>
+      <div class="composer">
+        <textarea id="userInput" placeholder="Describe the feature, constraints, and expected behavior..."></textarea>
+        <div class="actions">
+          <button id="sendBtn" class="primary">Send To Planner</button>
+          <button id="generateBtn">Generate JSON Spec + Prompt</button>
+          <button id="saveBtn" class="warn" disabled>Save Spec File</button>
+        </div>
+      </div>
+      <div id="meta" class="meta">No artifacts generated yet.</div>
+    </section>
+    <div id="colResizer" class="resizer col" title="Resize columns"></div>
 
-    <div class="card">
-      <div class="title">Implementation Explanation</div>
-      <div id="explanationPane">No blueprint generated yet.</div>
-      <ul id="nodesList"></ul>
-    </div>
-
-    <div class="card" style="flex: 1; min-height: 220px; display: flex; flex-direction: column; gap: 8px;">
-      <div class="title">Blueprint Chat</div>
-      <div id="chatLog" class="chat-log" style="flex:1;">
-        <div class="bubble assistant">Ask follow-up questions about the plan, reuse candidates, file placement, risks, and tests.</div>
-      </div>
-      <div class="row">
-        <textarea id="chatInput" placeholder="Ask about this blueprint..." style="min-height: 52px;"></textarea>
-        <button id="askBtn">Ask</button>
-      </div>
+    <div class="right-wrap" id="rightWrap">
+      <section class="panel" id="jsonPanel">
+        <div class="header">
+          <div class="title">JSON Spec</div>
+          <button id="copySpecBtn" class="icon-btn" title="Copy JSON spec" aria-label="Copy JSON spec">⧉</button>
+        </div>
+        <div id="specHead" class="artifact-head">Waiting for generation.</div>
+        <pre id="specView">{}</pre>
+      </section>
+      <div id="rowResizer" class="resizer row" title="Resize rows"></div>
+      <section class="panel" id="promptPanel">
+        <div class="header">
+          <div class="title">Prompt Output</div>
+          <button id="copyPromptBtn" class="icon-btn" title="Copy prompt output" aria-label="Copy prompt output">⧉</button>
+        </div>
+        <div id="promptHead" class="artifact-head">Use this prompt with coding AI when ready.</div>
+        <pre id="promptView"></pre>
+      </section>
     </div>
   </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const featureRequest = document.getElementById('featureRequest');
-    const generateBtn = document.getElementById('generateBtn');
-    const openCircuitBtn = document.getElementById('openCircuitBtn');
-    const applyBtn = document.getElementById('applyBtn');
     const statusEl = document.getElementById('status');
-    const explanationPane = document.getElementById('explanationPane');
-    const nodesList = document.getElementById('nodesList');
-    const chatLog = document.getElementById('chatLog');
-    const chatInput = document.getElementById('chatInput');
-    const askBtn = document.getElementById('askBtn');
+    const chatEl = document.getElementById('chat');
+    const userInput = document.getElementById('userInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const generateBtn = document.getElementById('generateBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const metaEl = document.getElementById('meta');
+    const specHead = document.getElementById('specHead');
+    const specView = document.getElementById('specView');
+    const promptHead = document.getElementById('promptHead');
+    const promptView = document.getElementById('promptView');
+    const copyChatBtn = document.getElementById('copyChatBtn');
+    const copySpecBtn = document.getElementById('copySpecBtn');
+    const copyPromptBtn = document.getElementById('copyPromptBtn');
+    const layoutEl = document.querySelector('.layout');
+    const rightWrapEl = document.getElementById('rightWrap');
+    const colResizer = document.getElementById('colResizer');
+    const rowResizer = document.getElementById('rowResizer');
 
-    let history = [];
-    let isBusy = false;
+    const state = {
+      busy: false,
+      history: [],
+      artifacts: null
+    };
 
     function setStatus(text) {
       statusEl.textContent = String(text || '');
     }
 
     function setBusy(next) {
-      isBusy = !!next;
-      generateBtn.disabled = isBusy;
-      askBtn.disabled = isBusy;
-      openCircuitBtn.disabled = isBusy;
-      applyBtn.disabled = isBusy;
+      state.busy = !!next;
+      sendBtn.disabled = state.busy;
+      generateBtn.disabled = state.busy;
+      saveBtn.disabled = state.busy || !state.artifacts;
+      userInput.disabled = state.busy;
     }
 
-    function appendChat(role, text) {
-      const bubble = document.createElement('div');
-      bubble.className = 'bubble ' + (role === 'user' ? 'user' : 'assistant');
-      bubble.textContent = String(text || '');
-      chatLog.appendChild(bubble);
-      chatLog.scrollTop = chatLog.scrollHeight;
-      history.push({ role, text: String(text || '') });
+    function formatAssistantText(text) {
+      return String(text || '')
+        .replace(/\\r\\n/g, '\\n')
+        .replace(/\\*\\*(.*?)\\*\\*/g, '$1')
+        .split(String.fromCharCode(96)).join('')
+        .replace(/^\\s*-\\s+/gm, '- ')
+        .replace(/\\n{3,}/g, '\\n\\n')
+        .trim();
     }
 
-    function renderPlan(plan) {
-      explanationPane.textContent = plan?.explanation || 'No explanation generated.';
-      nodesList.textContent = '';
-      const nodes = Array.isArray(plan?.nodes) ? plan.nodes : [];
-      for (const node of nodes) {
-        const li = document.createElement('li');
-        li.textContent = '[' + String(node.kind || 'node') + '] ' + String(node.label || '') + (node.path ? ' (' + node.path + ')' : '');
-        nodesList.appendChild(li);
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    async function copyText(text, label) {
+      const value = String(text || '').trim();
+      if (!value) {
+        setStatus('Nothing to copy from ' + label + '.');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(value);
+        setStatus(label + ' copied.');
+      } catch {
+        setStatus('Copy failed for ' + label + '.');
       }
     }
 
-    generateBtn.addEventListener('click', () => {
-      const text = String(featureRequest.value || '').trim();
-      if (!text || isBusy) return;
-      appendChat('user', text);
-      setBusy(true);
-      setStatus('Generating blueprint...');
-      vscode.postMessage({ type: 'generateBlueprint', featureRequest: text, history });
-    });
+    function getChatTranscriptText() {
+      return state.history
+        .map((turn) => (turn.role === 'assistant' ? 'ASSISTANT' : 'USER') + ': ' + String(turn.text || '').trim())
+        .join('\\n\\n')
+        .trim();
+    }
 
-    askBtn.addEventListener('click', () => {
-      const text = String(chatInput.value || '').trim();
-      if (!text || isBusy) return;
-      chatInput.value = '';
-      appendChat('user', text);
-      setBusy(true);
-      setStatus('Thinking...');
-      vscode.postMessage({ type: 'askBlueprint', question: text, history });
-    });
+    function initResizers() {
+      if (!layoutEl || !rightWrapEl || !colResizer || !rowResizer) {
+        return;
+      }
 
-    openCircuitBtn.addEventListener('click', () => {
-      if (isBusy) return;
-      vscode.postMessage({ type: 'openBlueprintCircuit' });
-      setStatus('Opening Circuit view for blueprint graph...');
-    });
+      colResizer.addEventListener('pointerdown', (ev) => {
+        if (window.matchMedia('(max-width: 1180px)').matches) {
+          return;
+        }
+        ev.preventDefault();
+        const rect = layoutEl.getBoundingClientRect();
+        const minLeft = 320;
+        const maxLeft = Math.max(minLeft, rect.width - 320);
 
-    applyBtn.addEventListener('click', () => {
-      if (isBusy) return;
+        const onMove = (moveEv) => {
+          const left = clamp(moveEv.clientX - rect.left - 12, minLeft, maxLeft);
+          layoutEl.style.setProperty('--left-width', left + 'px');
+        };
+
+        const onUp = () => {
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+        };
+
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+      });
+
+      rowResizer.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        const rect = rightWrapEl.getBoundingClientRect();
+        const minTop = 140;
+        const maxTop = Math.max(minTop, rect.height - 200);
+
+        const onMove = (moveEv) => {
+          const top = clamp(moveEv.clientY - rect.top - 8, minTop, maxTop);
+          rightWrapEl.style.setProperty('--top-height', top + 'px');
+        };
+
+        const onUp = () => {
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+        };
+
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+      });
+    }
+
+    function pushBubble(role, text) {
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble ' + (role === 'user' ? 'user' : 'assistant');
+      bubble.textContent = role === 'assistant' ? formatAssistantText(text) : String(text || '');
+      chatEl.appendChild(bubble);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function addHistory(role, text) {
+      state.history.push({ role, text: String(text || '') });
+    }
+
+    function sendTurn() {
+      if (state.busy) {
+        return;
+      }
+      const message = String(userInput.value || '').trim();
+      if (!message) {
+        setStatus('Enter a feature message first.');
+        return;
+      }
+      addHistory('user', message);
+      pushBubble('user', message);
+      userInput.value = '';
       setBusy(true);
-      setStatus('Awaiting apply confirmation...');
-      vscode.postMessage({ type: 'applyBlueprint' });
+      setStatus('Planner is analyzing workspace context and asking next best questions...');
+      vscode.postMessage({
+        type: 'blueprintUserTurn',
+        userMessage: message,
+        history: state.history
+      });
+    }
+
+    function generatePrompt() {
+      if (state.busy) {
+        return;
+      }
+      if (!state.history.length) {
+        setStatus('Start with at least one chat turn before generating.');
+        return;
+      }
+      setBusy(true);
+      setStatus('Generating final JSON spec and detailed implementation prompt...');
+      vscode.postMessage({
+        type: 'blueprintGeneratePrompt',
+        history: state.history
+      });
+    }
+
+    function saveArtifacts() {
+      if (state.busy || !state.artifacts) {
+        return;
+      }
+      setBusy(true);
+      setStatus('Saving spec artifacts to workspace...');
+      vscode.postMessage({ type: 'blueprintSavePromptArtifacts' });
+    }
+
+    function applyArtifacts(artifacts) {
+      state.artifacts = artifacts || null;
+      specHead.textContent = artifacts
+        ? 'Feature: ' + (artifacts.featureName || 'Untitled') + '\\nGenerated: ' + new Date(artifacts.generatedAt).toLocaleString()
+        : 'Waiting for generation.';
+      specView.textContent = artifacts ? JSON.stringify(artifacts.spec || {}, null, 2) : '{}';
+      promptView.textContent = artifacts ? String(artifacts.prompt || '') : '';
+      saveBtn.disabled = state.busy || !state.artifacts;
+      metaEl.textContent = artifacts
+        ? 'Model: ' + String(artifacts.modelLabel || 'unknown')
+        : 'No artifacts generated yet.';
+    }
+
+    sendBtn.addEventListener('click', sendTurn);
+    generateBtn.addEventListener('click', generatePrompt);
+    saveBtn.addEventListener('click', saveArtifacts);
+    copyChatBtn?.addEventListener('click', () => {
+      void copyText(getChatTranscriptText(), 'Blueprint Planner Chat');
+    });
+    copySpecBtn?.addEventListener('click', () => {
+      void copyText(specView.textContent || '', 'JSON Spec');
+    });
+    copyPromptBtn?.addEventListener('click', () => {
+      void copyText(promptView.textContent || '', 'Prompt Output');
+    });
+    userInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
+        ev.preventDefault();
+        sendTurn();
+      }
     });
 
     window.addEventListener('message', (event) => {
       const msg = event.data;
-      if (!msg || typeof msg !== 'object') return;
+      if (!msg || typeof msg !== 'object') {
+        return;
+      }
 
-      if (msg.type === 'blueprintGenerated') {
+      if (msg.type === 'blueprintAssistantTurn') {
         setBusy(false);
         if (msg.error) {
-          setStatus('Blueprint generation failed.');
-          appendChat('assistant', 'Error: ' + String(msg.error));
+          setStatus('Planner error: ' + String(msg.error));
           return;
         }
-        renderPlan(msg.plan);
-        const nodeCount = Array.isArray(msg?.plan?.nodes) ? msg.plan.nodes.length : 0;
-        setStatus('Blueprint generated (' + nodeCount + ' nodes).');
-        appendChat('assistant', 'Blueprint plan ready. Review implementation explanation, then open in Circuit or ask follow-up questions.');
+        const result = msg.result || {};
+        const assistantText = String(result.message || '').trim() || 'No response generated.';
+        addHistory('assistant', assistantText);
+        pushBubble('assistant', assistantText);
+        const unresolved = Array.isArray(result.unresolvedQuestions) ? result.unresolvedQuestions.length : 0;
+        setStatus(unresolved > 0
+          ? ('Planner needs ' + unresolved + ' more clarification item(s).')
+          : 'Planner looks complete. Generate when ready.');
+        metaEl.textContent = unresolved > 0
+          ? ('Unresolved questions:\\n' + result.unresolvedQuestions.join('\\n- '))
+          : 'No unresolved questions detected in this turn.';
         return;
       }
 
-      if (msg.type === 'blueprintAnswered') {
+      if (msg.type === 'blueprintPromptGenerated') {
         setBusy(false);
         if (msg.error) {
-          setStatus('Chat request failed.');
-          appendChat('assistant', 'Error: ' + String(msg.error));
+          setStatus('Generation failed: ' + String(msg.error));
           return;
         }
-        appendChat('assistant', String(msg.answer || 'No response generated.'));
-        setStatus('Response received.');
+        applyArtifacts(msg.artifacts || null);
+        setStatus('Artifacts generated. Review JSON spec and prompt, then save.');
         return;
       }
 
-      if (msg.type === 'blueprintApplied') {
+      if (msg.type === 'blueprintPromptSaved') {
         setBusy(false);
-        const result = msg.result || { approved: false, message: 'Unknown result.' };
-        setStatus(String(result.message || 'Done.'));
-        appendChat('assistant', String(result.message || 'Done.'));
-        return;
-      }
-
-      if (msg.type === 'blueprintOpenedCircuit' && msg.error) {
-        setStatus('Could not open Circuit view.');
-        appendChat('assistant', 'Error: ' + String(msg.error));
+        const result = msg.result || {};
+        const ok = !!result.saved;
+        setStatus(ok ? 'Spec saved.' : 'Save failed.');
+        metaEl.textContent = String(result.message || (ok ? 'Saved.' : 'Not saved.'));
       }
     });
+
+    initResizers();
   </script>
 </body>
 </html>`;
 	}
+}
+
+function normalizeHistory(raw: any): BlueprintChatTurn[] {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	return raw
+		.map((turn) => ({
+			role: (turn?.role === 'assistant' ? 'assistant' : 'user') as 'assistant' | 'user',
+			text: String(turn?.text || '').trim()
+		}))
+		.filter((turn) => turn.text.length > 0);
 }
 
 function getNonce(): string {
