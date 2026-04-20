@@ -10,6 +10,13 @@ Mushroom PCE is a VS Code extension that helps you understand code faster with A
   - Developer Mode: AI explanation with structured sections.
   - List Mode: deterministic static inventory (no model call).
 - Symbol-aware output with clickable links (`Go To Function`).
+- Blueprint Planner (plain-English feature planning workspace):
+  - Planner chat that is grounded in scanned `src/` structure + known functions/exports.
+  - Reuse-first planning suggestions before proposing new files/functions.
+  - Generates both a structured JSON spec and a plain-text implementation prompt.
+  - Saves artifacts to `docs/feature-plans/*.md`.
+  - Resizable sections (`Blueprint Planner Chat`, `JSON Spec`, `Prompt Output`).
+  - One-click copy buttons for chat transcript, JSON spec, and prompt output.
 - Circuit Mode for architecture/runtime exploration:
   - Current File graph
   - Full Architecture graph
@@ -97,6 +104,7 @@ This section explains every control visible in the Circuit Mode HUD, how they di
 - `Mushroom PCE: Set List Mode` (`mushroom-pce.setListMode`)
 - `Mushroom PCE: Set Developer Mode` (`mushroom-pce.setDeveloperMode`)
 - `Mushroom PCE: Open Circuit Mode` (`mushroom-pce.openCircuit`)
+- `Mushroom PCE: Open Blueprint` (`mushroom-pce.openBlueprint`)
 - `Mushroom PCE: Go To Function` (`mushroom-pce.goToFunction`)
 
 ## Project Structure
@@ -122,6 +130,8 @@ src/
   controllers/
     mushroom/
       MushroomPanelController.ts
+    blueprint/
+      BlueprintPanelController.ts
     circuit/
       CircuitPanelController.ts
       CircuitDetailsPanelController.ts
@@ -138,6 +148,10 @@ src/
       buildPrompt.ts
     symbols/
       parseSymbolLocations.ts
+    blueprint/
+      buildBlueprintPlan.ts
+      generateBlueprintCode.ts
+      scanWorkspaceBlueprint.ts
     circuit/
       buildGraph.ts
       buildGraphHybrid.ts
@@ -206,3 +220,4 @@ Useful scripts:
 - Graph quality depends on language server symbol/call-hierarchy support.
 - Large workspaces may take longer for Full Architecture/CodeFlow views.
 - Some edges can be heuristic/fallback-labeled when high-confidence API data is unavailable.
+- Blueprint planning context is currently sourced from `src/` and sampled file insights.
