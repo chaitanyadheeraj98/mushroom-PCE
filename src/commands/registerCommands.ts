@@ -23,6 +23,9 @@ type RegisterCommandsDeps = {
 	getSelectedResponseMode: () => ResponseMode;
 	setSelectedResponseMode: (mode: ResponseMode) => void;
 	applyModeStateToPanel: (panel: MushroomPanel) => void;
+	getGraphifyContextEnabled: () => boolean;
+	setGraphifyContextEnabled: (enabled: boolean) => void;
+	applyGraphifyStateToPanel: (panel: MushroomPanel) => void;
 	applyModelStateToPanel: (panel: MushroomPanel) => void;
 	applySymbolStateToPanel: (panel: MushroomPanel, document: vscode.TextDocument) => Promise<void>;
 	tryRestoreCachedAnalysis: (panel: MushroomPanel) => Promise<boolean>;
@@ -53,6 +56,7 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		panel.setExplanation('Click Analyze to explain the active file.');
 		panel.setLanguageWarning(undefined);
 		deps.applyModeStateToPanel(panel);
+		deps.applyGraphifyStateToPanel(panel);
 
 		const currentDoc = deps.getCurrentDocument();
 		if (currentDoc) {
@@ -152,6 +156,23 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		deps.output.appendLine('response mode selected: developer');
 	});
 
+	const toggleGraphifyContextCommand = vscode.commands.registerCommand(
+		'mushroom-pce.toggleGraphifyContext',
+		async () => {
+			const next = !deps.getGraphifyContextEnabled();
+			deps.setGraphifyContextEnabled(next);
+			const panel = MushroomPanel.getCurrentPanel();
+			if (panel && !panel.isDisposed()) {
+				deps.applyGraphifyStateToPanel(panel);
+				await deps.tryRestoreCachedAnalysis(panel);
+			}
+			vscode.window.showInformationMessage(
+				`Mushroom PCE Graphify context ${next ? 'enabled' : 'disabled'}.`
+			);
+			deps.output.appendLine(`graphify context toggle: ${next ? 'on' : 'off'}`);
+		}
+	);
+
 	const openCircuitCommand = vscode.commands.registerCommand('mushroom-pce.openCircuit', async () => {
 		const doc = deps.getCurrentDocument();
 		if (!doc) {
@@ -208,6 +229,7 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		selectModelCommand,
 		setListModeCommand,
 		setDeveloperModeCommand,
+		toggleGraphifyContextCommand,
 		goToFunctionCommand,
 		openCircuitCommand,
 		openBlueprintCommand

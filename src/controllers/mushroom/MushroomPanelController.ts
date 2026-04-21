@@ -16,6 +16,7 @@ export class MushroomPanel {
 	private availableModelLabels: string[] = [];
 	private symbolLinks: SymbolLink[] = [];
 	private currentResponseMode: ResponseMode = 'developer';
+	private graphifyContextEnabled = false;
 	private languageWarning: string | undefined;
 
 	private pendingRender: ReturnType<typeof setTimeout> | undefined;
@@ -110,6 +111,11 @@ export class MushroomPanel {
 		this.renderSoon();
 	}
 
+	setGraphifyContextInfo(enabled: boolean): void {
+		this.graphifyContextEnabled = enabled;
+		this.renderSoon();
+	}
+
 	setLanguageWarning(warning: string | undefined): void {
 		this.languageWarning = warning;
 		this.renderSoon();
@@ -150,6 +156,7 @@ export class MushroomPanel {
 
 		const listActive = this.currentResponseMode === 'list';
 		const developerActive = this.currentResponseMode === 'developer';
+		const graphifyActive = this.graphifyContextEnabled;
 		const warningHtml = this.languageWarning
 			? `<div class="warning-card">${escapeHtml(this.languageWarning)}</div>`
 			: '';
@@ -262,6 +269,7 @@ export class MushroomPanel {
       display: flex;
       gap: 10px;
       align-items: center;
+      flex-wrap: wrap;
     }
     .mode-pill {
       display: inline-block;
@@ -276,6 +284,11 @@ export class MushroomPanel {
       color: #ffffff;
       background: color-mix(in oklab, var(--accent) 70%, black);
       border-color: color-mix(in oklab, var(--accent) 60%, white);
+    }
+    .mode-pill.graphify-active {
+      color: #ffffff;
+      background: color-mix(in oklab, #0ea5e9 70%, black);
+      border-color: color-mix(in oklab, #0ea5e9 60%, white);
     }
     .analyze-btn {
       display: inline-block;
@@ -422,6 +435,9 @@ export class MushroomPanel {
       <div class="mode-actions">
         <a class="mode-pill ${listActive ? 'active' : ''}" href="command:mushroom-pce.setListMode">List Mode</a>
         <a class="mode-pill ${developerActive ? 'active' : ''}" href="command:mushroom-pce.setDeveloperMode">Developer Mode</a>
+        <a class="mode-pill ${graphifyActive ? 'graphify-active' : ''}" href="command:mushroom-pce.toggleGraphifyContext">
+          Graphify Context: ${graphifyActive ? 'On' : 'Off'}
+        </a>
       </div>
     </div>
     ${warningHtml}

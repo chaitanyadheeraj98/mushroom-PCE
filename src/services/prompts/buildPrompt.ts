@@ -1,6 +1,26 @@
 ﻿import { ResponseMode } from '../../shared/types/appTypes';
 
-export function buildPrompt(languageId: string, code: string, responseMode: ResponseMode): string {
+type BuildPromptOptions = {
+	graphContext?: string;
+};
+
+export function buildPrompt(
+	languageId: string,
+	code: string,
+	responseMode: ResponseMode,
+	options?: BuildPromptOptions
+): string {
+	const graphContextBlock = options?.graphContext?.trim()
+		? `
+Graphify Project Context (authoritative high-level architecture summary):
+\`\`\`markdown
+${options.graphContext.trim()}
+\`\`\`
+
+Use this Graphify context to improve architecture-level accuracy and navigation decisions.
+When it conflicts with uncertain assumptions, prefer the Graphify context.
+`
+		: '';
 	const developerPrompt = `
 You are a friendly programming teacher for complete beginners.
 
@@ -48,6 +68,7 @@ Formatting rules:
 - In "Deeper Concepts", keep each concept to 1-2 lines max.
 - Avoid jargon unless you also define it in one sentence.
 - Keep each section concise to avoid overload (roughly 3-7 bullets per section when possible).
+${graphContextBlock}
 
 Code (${languageId}):
 \`\`\`${languageId}

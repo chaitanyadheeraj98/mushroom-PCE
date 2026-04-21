@@ -33,6 +33,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 	let availableModels: vscode.LanguageModelChat[] = [];
 	let selectedModelId: string | undefined;
 	let selectedResponseMode: ResponseMode = 'developer';
+	let graphifyContextEnabled = Boolean(context.workspaceState.get<boolean>('mushroom-pce.graphifyContextEnabled', false));
 
 	let symbolIndexTimer: ReturnType<typeof setTimeout> | undefined;
 	type CacheEntry = { text: string; updatedAt: number; docVersion: number };
@@ -79,6 +80,10 @@ export function activateApp(context: vscode.ExtensionContext) {
 		panel.setResponseModeInfo(selectedResponseMode);
 	};
 
+	const applyGraphifyStateToPanel = (panel: MushroomPanel): void => {
+		panel.setGraphifyContextInfo(graphifyContextEnabled);
+	};
+
 	const getCurrentDocument = (): vscode.TextDocument | undefined => {
 		const editor = vscode.window.activeTextEditor;
 		return editor?.document ?? lastDocument;
@@ -87,14 +92,16 @@ export function activateApp(context: vscode.ExtensionContext) {
 	const getCacheKey = (
 		doc: vscode.TextDocument,
 		mode: ResponseMode,
-		options?: { modelId?: string; listVariant?: ListModeVariant }
+		options?: { modelId?: string; listVariant?: ListModeVariant; graphifyEnabled?: boolean }
 	): string => {
 		if (mode === 'list') {
 			const listVariant = options?.listVariant ?? 'list-local';
 			return `${doc.uri.toString()}::${listVariant}::${mode}`;
 		}
 		const keyModel = options?.modelId ?? 'no-model';
-		return `${doc.uri.toString()}::${keyModel}::${mode}`;
+		const graphifyKey =
+			mode === 'developer' ? `::graphify-${options?.graphifyEnabled ? 'on' : 'off'}` : '';
+		return `${doc.uri.toString()}::${keyModel}::${mode}${graphifyKey}`;
 	};
 
 	const tryRestoreCachedAnalysis = async (panel: MushroomPanel): Promise<boolean> => {
@@ -137,7 +144,10 @@ export function activateApp(context: vscode.ExtensionContext) {
 				}
 			}
 		} else {
-			const key = getCacheKey(doc, selectedResponseMode, { modelId: modelIdForCache });
+			const key = getCacheKey(doc, selectedResponseMode, {
+				modelId: modelIdForCache,
+				graphifyEnabled: selectedResponseMode === 'developer' ? graphifyContextEnabled : undefined
+			});
 			cached = analysisCache.get(key);
 		}
 		if (!cached) {
@@ -275,11 +285,16 @@ export function activateApp(context: vscode.ExtensionContext) {
 					}
 
 					output.appendLine(`using model id=${model.id}`);
+					const graphContext =
+						selectedResponseMode === 'developer' && graphifyContextEnabled
+							? await loadGraphifyDeveloperContext(document, output)
+							: undefined;
 					const explanation = await explainCode(
 						model,
 						code,
 						document.languageId,
 						selectedResponseMode,
+						graphContext,
 						(chunk) => {
 							if (runId !== latestRunId || panel.isDisposed() || signal.aborted) {
 								return;
@@ -306,7 +321,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 			if (result.explanation && result.status !== 'No model available') {
 				const cacheKey = getCacheKey(document, selectedResponseMode, {
 					modelId: result.cacheModelId,
-					listVariant: result.cacheListVariant
+					listVariant: result.cacheListVariant,
+					graphifyEnabled: selectedResponseMode === 'developer' ? graphifyContextEnabled : undefined
 				});
 				analysisCache.set(cacheKey, { text: result.explanation, updatedAt: Date.now(), docVersion: document.version });
 			}
@@ -360,6 +376,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 								doc.getText(),
 								doc.languageId,
 								'developer',
+								undefined,
 								undefined,
 								signal
 							);
@@ -572,7 +589,13 @@ export function activateApp(context: vscode.ExtensionContext) {
 		setSelectedResponseMode: (mode) => {
 			selectedResponseMode = mode;
 		},
+		getGraphifyContextEnabled: () => graphifyContextEnabled,
+		setGraphifyContextEnabled: (enabled) => {
+			graphifyContextEnabled = enabled;
+			void context.workspaceState.update('mushroom-pce.graphifyContextEnabled', enabled);
+		},
 		applyModeStateToPanel,
+		applyGraphifyStateToPanel,
 		applyModelStateToPanel,
 		applySymbolStateToPanel,
 		tryRestoreCachedAnalysis,
@@ -659,15 +682,66 @@ async function explainCode(
 	code: string,
 	languageId: string,
 	responseMode: ResponseMode,
+	graphContext?: string,
 	onChunk?: (chunk: string) => void,
 	signal?: AbortSignal
 ): Promise<string | undefined> {
 	try {
-		const prompt = buildPrompt(languageId, code, responseMode);
+		const prompt = buildPrompt(languageId, code, responseMode, { graphContext });
 		return await requestModelText(model, prompt, { onChunk, signal });
 	} catch (error: any) {
 		vscode.window.showErrorMessage('Error: ' + error.message);
 		return;
+	}
+}
+
+async function loadGraphifyDeveloperContext(
+	document: vscode.TextDocument,
+	output: vscode.OutputChannel
+): Promise<string | undefined> {
+	const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+	if (!workspaceFolder) {
+		return undefined;
+	}
+
+	const reportUri = vscode.Uri.joinPath(workspaceFolder.uri, 'graphify-out', 'GRAPH_REPORT.md');
+	try {
+		const [reportBytes, reportStats] = await Promise.all([
+			vscode.workspace.fs.readFile(reportUri),
+			vscode.workspace.fs.stat(reportUri)
+		]);
+		const reportText = new TextDecoder().decode(reportBytes).trim();
+		if (!reportText) {
+			return undefined;
+		}
+
+		const maxChars = 7000;
+		const cappedReport =
+			reportText.length > maxChars ? `${reportText.slice(0, maxChars)}\n\n[Graphify context truncated]` : reportText;
+
+		let freshnessNote = '';
+		try {
+			const docStats = await vscode.workspace.fs.stat(document.uri);
+			if (docStats.mtime > reportStats.mtime) {
+				freshnessNote = 'Note: Graphify report may be stale for latest file edits.';
+				output.appendLine('graphify context loaded (report older than active file)');
+			}
+		} catch {
+			// Ignore stat comparison errors and proceed with available graph context.
+		}
+
+		const relativePath = path.relative(workspaceFolder.uri.fsPath, document.uri.fsPath).replace(/\\/g, '/');
+		return [
+			`Active file: ${relativePath}`,
+			freshnessNote,
+			'',
+			cappedReport
+		]
+			.filter(Boolean)
+			.join('\n');
+	} catch {
+		output.appendLine('graphify context unavailable (missing graphify-out/GRAPH_REPORT.md)');
+		return undefined;
 	}
 }
 

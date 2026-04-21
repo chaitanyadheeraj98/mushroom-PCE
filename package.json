@@ -16,6 +16,7 @@
     "onCommand:mushroom-pce.goToFunction",
     "onCommand:mushroom-pce.setListMode",
     "onCommand:mushroom-pce.setDeveloperMode",
+    "onCommand:mushroom-pce.toggleGraphifyContext",
     "onCommand:mushroom-pce.openCircuit",
     "onCommand:mushroom-pce.openBlueprint"
   ],
@@ -45,6 +46,10 @@
       {
         "command": "mushroom-pce.setDeveloperMode",
         "title": "Mushroom PCE: Set Developer Mode"
+      },
+      {
+        "command": "mushroom-pce.toggleGraphifyContext",
+        "title": "Mushroom PCE: Toggle Graphify Context"
       },
       {
         "command": "mushroom-pce.openCircuit",
