@@ -156,6 +156,17 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		deps.output.appendLine('response mode selected: developer');
 	});
 
+	const setDefinitionModeCommand = vscode.commands.registerCommand('mushroom-pce.setDefinitionMode', async () => {
+		deps.setSelectedResponseMode('definition');
+		const panel = MushroomPanel.getCurrentPanel();
+		if (panel && !panel.isDisposed()) {
+			deps.applyModeStateToPanel(panel);
+			await deps.tryRestoreCachedAnalysis(panel);
+		}
+		vscode.window.showInformationMessage('Mushroom PCE mode set to Definition Mode');
+		deps.output.appendLine('response mode selected: definition');
+	});
+
 	const toggleGraphifyContextCommand = vscode.commands.registerCommand(
 		'mushroom-pce.toggleGraphifyContext',
 		async () => {
@@ -229,6 +240,7 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		selectModelCommand,
 		setListModeCommand,
 		setDeveloperModeCommand,
+		setDefinitionModeCommand,
 		toggleGraphifyContextCommand,
 		goToFunctionCommand,
 		openCircuitCommand,

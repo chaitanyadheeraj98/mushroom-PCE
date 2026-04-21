@@ -19,6 +19,11 @@ ${options.graphContext.trim()}
 
 Use this Graphify context to improve architecture-level accuracy and navigation decisions.
 When it conflicts with uncertain assumptions, prefer the Graphify context.
+If "Graphify Smart Query Context (CLI)" or "Graphify Path Evidence (CLI)" is present:
+- Treat those node/edge/path outputs as concrete evidence.
+- In each high/medium finding, add one explicit graph citation line:
+  - Graph Evidence: <query/path summary with node/edge identifiers from context>
+  - If no relevant graph evidence exists for a finding, say: Graph Evidence: none found in provided graph context.
 `
 		: '';
 	const developerPrompt = `
@@ -40,12 +45,19 @@ Prioritize concrete, high-impact findings over broad summaries.
 
 Required structure (use exactly these headings):
 # Review Summary
+# System Role and Linked Impact
 # Findings
 # Open Questions
 # Suggested Next Steps
 
 Review behavior:
 - In "Review Summary", provide 2-4 bullets on overall quality and risk.
+- In "System Role and Linked Impact", classify the active file as exactly one: \`big_machine\`, \`connector\`, or \`small_cog\`.
+- In "System Role and Linked Impact", include:
+  - Role decision + short why
+  - Top linked files (if provided)
+  - Whether linked dependencies appear to be working as intended
+  - Fallback note when linked graph context is unavailable
 - In "Findings", list issues ordered by severity: blocker, high, medium, low.
 - For each finding include:
   - Severity: blocker | high | medium | low
@@ -169,7 +181,50 @@ ${code}
 \`\`\`
 `;
 
-	return responseMode === 'list' ? listPrompt : developerPrompt;
+	const definitionPrompt = `
+You are a beginner-friendly code explainer.
+
+Goal:
+- Explain what this file does in simple language.
+- Explain how this file connects to other files and whether those connections seem to behave as intended.
+- Help a beginner understand both local logic and system context.
+
+Return Markdown only.
+Do not use markdown tables.
+Use backticks for code identifiers.
+Keep explanations clear and practical.
+
+Required structure (use exactly these headings):
+# File Purpose
+# Core Flow
+# Functions and Responsibilities
+# Connected Files and Dependencies
+# Is This File a Core Engine or a Supporting Cog?
+# Behavior Check in System Context
+# Risks or Red Flags
+# Quick Glossary
+# Key Takeaways
+
+Definition mode behavior:
+- Keep language beginner-friendly but technically accurate.
+- In "Connected Files and Dependencies", cite linked files and relationships when graph context is available.
+- In "Is This File a Core Engine or a Supporting Cog?", classify as one of: \`big_machine\`, \`connector\`, \`small_cog\`, with a short reason.
+- In "Behavior Check in System Context", explain whether this file appears to be working as intended relative to connected files.
+- If graph context is missing, explicitly say linked-file inference is limited and continue with current-file analysis.
+- Include concrete examples from code where possible.
+${graphContextBlock}
+
+Code (${languageId}):
+\`\`\`${languageId}
+${code}
+\`\`\`
+`;
+
+	if (responseMode === 'list') {
+		return listPrompt;
+	}
+
+	return responseMode === 'definition' ? definitionPrompt : developerPrompt;
 }
 
 export function buildListFormatPolishPrompt(languageId: string, canonicalListOutput: string): string {

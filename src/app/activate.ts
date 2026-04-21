@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { spawn } from 'child_process';
 
 import { AiJobCancelledError, AiJobOrchestrator, isAiJobCancelledError } from '../services/ai/aiJobOrchestrator';
 import { requestModelText } from '../services/ai/requestModelText';
@@ -36,8 +37,9 @@ export function activateApp(context: vscode.ExtensionContext) {
 	let graphifyContextEnabled = Boolean(context.workspaceState.get<boolean>('mushroom-pce.graphifyContextEnabled', false));
 
 	let symbolIndexTimer: ReturnType<typeof setTimeout> | undefined;
-	type CacheEntry = { text: string; updatedAt: number; docVersion: number };
+	type CacheEntry = { text: string; updatedAt: number; docVersion: number; graphifyFingerprint?: string };
 	const analysisCache = new Map<string, CacheEntry>();
+	const lastGraphifyFingerprintByDoc = new Map<string, string>();
 	const nodeDeveloperContextCache = new Map<string, CacheEntry>();
 	const circuitAiCache = new Map<string, CircuitAiEnrichmentResult>();
 	const aiJobs = new AiJobOrchestrator({
@@ -84,6 +86,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 		panel.setGraphifyContextInfo(graphifyContextEnabled);
 	};
 
+	const isGraphifyEligibleMode = (mode: ResponseMode): boolean => mode === 'developer' || mode === 'definition';
+
 	const getCurrentDocument = (): vscode.TextDocument | undefined => {
 		const editor = vscode.window.activeTextEditor;
 		return editor?.document ?? lastDocument;
@@ -92,7 +96,12 @@ export function activateApp(context: vscode.ExtensionContext) {
 	const getCacheKey = (
 		doc: vscode.TextDocument,
 		mode: ResponseMode,
-		options?: { modelId?: string; listVariant?: ListModeVariant; graphifyEnabled?: boolean }
+		options?: {
+			modelId?: string;
+			listVariant?: ListModeVariant;
+			graphifyEnabled?: boolean;
+			graphifyFingerprint?: string;
+		}
 	): string => {
 		if (mode === 'list') {
 			const listVariant = options?.listVariant ?? 'list-local';
@@ -100,8 +109,12 @@ export function activateApp(context: vscode.ExtensionContext) {
 		}
 		const keyModel = options?.modelId ?? 'no-model';
 		const graphifyKey =
-			mode === 'developer' ? `::graphify-${options?.graphifyEnabled ? 'on' : 'off'}` : '';
-		return `${doc.uri.toString()}::${keyModel}::${mode}${graphifyKey}`;
+			isGraphifyEligibleMode(mode) ? `::graphify-${options?.graphifyEnabled ? 'on' : 'off'}` : '';
+		const fingerprintKey =
+			isGraphifyEligibleMode(mode) && options?.graphifyEnabled && options?.graphifyFingerprint
+				? `::ctx-${options.graphifyFingerprint}`
+				: '';
+		return `${doc.uri.toString()}::${keyModel}::${mode}${graphifyKey}${fingerprintKey}`;
 	};
 
 	const tryRestoreCachedAnalysis = async (panel: MushroomPanel): Promise<boolean> => {
@@ -144,9 +157,17 @@ export function activateApp(context: vscode.ExtensionContext) {
 				}
 			}
 		} else {
+			const graphifyFingerprint =
+				isGraphifyEligibleMode(selectedResponseMode) && graphifyContextEnabled
+					? lastGraphifyFingerprintByDoc.get(doc.uri.toString())
+					: undefined;
+			if (isGraphifyEligibleMode(selectedResponseMode) && graphifyContextEnabled && !graphifyFingerprint) {
+				return false;
+			}
 			const key = getCacheKey(doc, selectedResponseMode, {
 				modelId: modelIdForCache,
-				graphifyEnabled: selectedResponseMode === 'developer' ? graphifyContextEnabled : undefined
+				graphifyEnabled: isGraphifyEligibleMode(selectedResponseMode) ? graphifyContextEnabled : undefined,
+				graphifyFingerprint
 			});
 			cached = analysisCache.get(key);
 		}
@@ -242,6 +263,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 				status: string;
 				cacheModelId?: string;
 				cacheListVariant?: ListModeVariant;
+				graphifyFingerprint?: string;
 			}>({
 				lane: 'analysis',
 				group: 'analysis:active-file',
@@ -285,16 +307,16 @@ export function activateApp(context: vscode.ExtensionContext) {
 					}
 
 					output.appendLine(`using model id=${model.id}`);
-					const graphContext =
-						selectedResponseMode === 'developer' && graphifyContextEnabled
-							? await loadGraphifyDeveloperContext(document, output)
+					const graphifyContext =
+						isGraphifyEligibleMode(selectedResponseMode) && graphifyContextEnabled
+							? await loadGraphifyDeveloperContext(document, output, signal)
 							: undefined;
 					const explanation = await explainCode(
 						model,
 						code,
 						document.languageId,
 						selectedResponseMode,
-						graphContext,
+						graphifyContext?.promptContext,
 						(chunk) => {
 							if (runId !== latestRunId || panel.isDisposed() || signal.aborted) {
 								return;
@@ -308,7 +330,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 					return {
 						explanation: explanation || 'No explanation generated.',
 						status: `Updated at ${new Date().toLocaleTimeString()}`,
-						cacheModelId: model.id
+						cacheModelId: model.id,
+						graphifyFingerprint: graphifyContext?.fingerprint
 					};
 				}
 			});
@@ -319,12 +342,22 @@ export function activateApp(context: vscode.ExtensionContext) {
 
 			panel.setExplanation(result.explanation);
 			if (result.explanation && result.status !== 'No model available') {
+				const docKey = document.uri.toString();
+				if (result.graphifyFingerprint) {
+					lastGraphifyFingerprintByDoc.set(docKey, result.graphifyFingerprint);
+				}
 				const cacheKey = getCacheKey(document, selectedResponseMode, {
 					modelId: result.cacheModelId,
 					listVariant: result.cacheListVariant,
-					graphifyEnabled: selectedResponseMode === 'developer' ? graphifyContextEnabled : undefined
+					graphifyEnabled: isGraphifyEligibleMode(selectedResponseMode) ? graphifyContextEnabled : undefined,
+					graphifyFingerprint: result.graphifyFingerprint
 				});
-				analysisCache.set(cacheKey, { text: result.explanation, updatedAt: Date.now(), docVersion: document.version });
+				analysisCache.set(cacheKey, {
+					text: result.explanation,
+					updatedAt: Date.now(),
+					docVersion: document.version,
+					graphifyFingerprint: result.graphifyFingerprint
+				});
 			}
 			panel.setStatus(result.status);
 			output.appendLine('runAnalysis completed');
@@ -695,20 +728,48 @@ async function explainCode(
 	}
 }
 
+type SystemRoleBucket = 'big_machine' | 'connector' | 'small_cog';
+
+type GraphifyDeveloperContextEnvelope = {
+	promptContext: string;
+	fingerprint: string;
+};
+
+type LinkedFileMetrics = {
+	path: string;
+	fanIn: number;
+	fanOut: number;
+	pathHits: number;
+	dependencySpreadTags: Set<string>;
+	lines: number[];
+	score: number;
+	snippet?: string;
+};
+
+type GraphifySmartContextSummary = {
+	text: string;
+	linkedFileIds: string[];
+	roleBucket: SystemRoleBucket;
+	fingerprintCore: string;
+};
+
 async function loadGraphifyDeveloperContext(
 	document: vscode.TextDocument,
-	output: vscode.OutputChannel
-): Promise<string | undefined> {
+	output: vscode.OutputChannel,
+	signal?: AbortSignal
+): Promise<GraphifyDeveloperContextEnvelope | undefined> {
 	const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
 	if (!workspaceFolder) {
 		return undefined;
 	}
 
 	const reportUri = vscode.Uri.joinPath(workspaceFolder.uri, 'graphify-out', 'GRAPH_REPORT.md');
+	const graphUri = vscode.Uri.joinPath(workspaceFolder.uri, 'graphify-out', 'graph.json');
 	try {
-		const [reportBytes, reportStats] = await Promise.all([
+		const [reportBytes, reportStats, graphStats] = await Promise.all([
 			vscode.workspace.fs.readFile(reportUri),
-			vscode.workspace.fs.stat(reportUri)
+			vscode.workspace.fs.stat(reportUri),
+			vscode.workspace.fs.stat(graphUri)
 		]);
 		const reportText = new TextDecoder().decode(reportBytes).trim();
 		if (!reportText) {
@@ -720,9 +781,11 @@ async function loadGraphifyDeveloperContext(
 			reportText.length > maxChars ? `${reportText.slice(0, maxChars)}\n\n[Graphify context truncated]` : reportText;
 
 		let freshnessNote = '';
+		let staleForActiveFile = false;
 		try {
 			const docStats = await vscode.workspace.fs.stat(document.uri);
 			if (docStats.mtime > reportStats.mtime) {
+				staleForActiveFile = true;
 				freshnessNote = 'Note: Graphify report may be stale for latest file edits.';
 				output.appendLine('graphify context loaded (report older than active file)');
 			}
@@ -731,18 +794,496 @@ async function loadGraphifyDeveloperContext(
 		}
 
 		const relativePath = path.relative(workspaceFolder.uri.fsPath, document.uri.fsPath).replace(/\\/g, '/');
-		return [
+		const smartContext = await loadGraphifySmartQueryContext({
+			workspaceFsPath: workspaceFolder.uri.fsPath,
+			graphFsPath: graphUri.fsPath,
+			relativePath,
+			document,
+			output,
+			signal
+		});
+		const freshnessMarker = `${reportStats.mtime}-${graphStats.mtime}-${staleForActiveFile ? 'stale' : 'fresh'}`;
+		const fallbackNote =
+			smartContext === undefined
+				? 'Linked Context Status: unavailable (graph query/path/snippet evidence not found); analysis falls back to current-file + report context.'
+				: '';
+		const promptContext = [
 			`Active file: ${relativePath}`,
 			freshnessNote,
+			`Graph freshness marker: ${freshnessMarker}`,
 			'',
-			cappedReport
+			cappedReport,
+			smartContext?.text,
+			fallbackNote
 		]
 			.filter(Boolean)
 			.join('\n');
+
+		const linkedFilesPart = smartContext?.linkedFileIds.join(',') || 'none';
+		const rolePart = smartContext?.roleBucket || 'small_cog';
+		const fingerprint = `gctx-v3|fresh=${freshnessMarker}|role=${rolePart}|links=${linkedFilesPart}|core=${smartContext?.fingerprintCore || 'none'}`;
+		return {
+			promptContext,
+			fingerprint
+		};
 	} catch {
 		output.appendLine('graphify context unavailable (missing graphify-out/GRAPH_REPORT.md)');
 		return undefined;
 	}
+}
+
+type GraphifySmartContextOptions = {
+	workspaceFsPath: string;
+	graphFsPath: string;
+	relativePath: string;
+	document: vscode.TextDocument;
+	output: vscode.OutputChannel;
+	signal?: AbortSignal;
+};
+
+type GraphifyCommandResult = {
+	success: boolean;
+	exitCode: number | null;
+	stdout: string;
+	stderr: string;
+	timedOut: boolean;
+};
+
+async function loadGraphifySmartQueryContext(options: GraphifySmartContextOptions): Promise<GraphifySmartContextSummary | undefined> {
+	const { output, graphFsPath, workspaceFsPath } = options;
+	try {
+		await vscode.workspace.fs.stat(vscode.Uri.file(graphFsPath));
+	} catch {
+		output.appendLine('graphify smart queries skipped (missing graphify-out/graph.json)');
+		return undefined;
+	}
+
+	const primarySymbol = guessPrimarySymbol(options.document.getText());
+	const queries = buildGraphifySmartQueries(options.relativePath, primarySymbol);
+	const pathPairs = buildGraphifyPathPairs(options.relativePath, primarySymbol);
+	if (!queries.length) {
+		return undefined;
+	}
+
+	const activeFsPath = normalizeFsPath(path.resolve(workspaceFsPath, options.relativePath));
+	const metricsByFile = new Map<string, LinkedFileMetrics>();
+	const queryOutputs: Array<{ query: string; text: string }> = [];
+	const querySections: string[] = [];
+	for (const query of queries) {
+		if (options.signal?.aborted) {
+			return undefined;
+		}
+		const result = await runGraphifyQueryCommand(query, options.graphFsPath, options.workspaceFsPath, options.signal);
+		if (!result.success) {
+			const reason = result.timedOut
+				? 'timeout'
+				: result.stderr.trim()
+					? result.stderr.trim()
+					: `exit=${String(result.exitCode)}`;
+			output.appendLine(`graphify query failed: "${query}" (${reason})`);
+			continue;
+		}
+		const cleaned = result.stdout.trim();
+		if (!cleaned || /^No matching nodes found\.?$/i.test(cleaned)) {
+			output.appendLine(`graphify query empty: "${query}"`);
+			continue;
+		}
+		queryOutputs.push({ query, text: cleaned });
+		collectLinkedMetricsFromOutput(cleaned, query, metricsByFile, activeFsPath);
+		const maxCharsPerQuery = 1800;
+		const capped = cleaned.length > maxCharsPerQuery ? `${cleaned.slice(0, maxCharsPerQuery)}\n... [truncated]` : cleaned;
+		querySections.push(`Query: ${query}\n${capped}`);
+	}
+
+	const pathOutputs: Array<{ from: string; to: string; text: string }> = [];
+	const pathSections: string[] = [];
+	for (const pair of pathPairs) {
+		if (options.signal?.aborted) {
+			return undefined;
+		}
+		const pathResult = await runGraphifyPathCommand(pair.from, pair.to, options.graphFsPath, options.workspaceFsPath, options.signal);
+		if (!pathResult.success) {
+			const reason = pathResult.timedOut
+				? 'timeout'
+				: pathResult.stderr.trim()
+					? pathResult.stderr.trim()
+					: `exit=${String(pathResult.exitCode)}`;
+			output.appendLine(`graphify path failed: "${pair.from}" -> "${pair.to}" (${reason})`);
+			continue;
+		}
+		const cleaned = pathResult.stdout.trim();
+		if (!cleaned || /^No path found\.?$/i.test(cleaned) || /^No matching nodes found\.?$/i.test(cleaned)) {
+			output.appendLine(`graphify path empty: "${pair.from}" -> "${pair.to}"`);
+			continue;
+		}
+		pathOutputs.push({ from: pair.from, to: pair.to, text: cleaned });
+		collectLinkedMetricsFromOutput(cleaned, `path:${pair.from}->${pair.to}`, metricsByFile, activeFsPath, true);
+		const maxCharsPerPath = 1600;
+		const capped = cleaned.length > maxCharsPerPath ? `${cleaned.slice(0, maxCharsPerPath)}\n... [truncated]` : cleaned;
+		pathSections.push(`Path: ${pair.from} -> ${pair.to}\n${capped}`);
+	}
+
+	if (!querySections.length && !pathSections.length) {
+		return undefined;
+	}
+
+	const rankedLinked = Array.from(metricsByFile.values())
+		.map((entry) => ({
+			...entry,
+			score: entry.fanIn * 3 + entry.fanOut * 2 + entry.pathHits * 2 + entry.dependencySpreadTags.size
+		}))
+		.sort((a, b) => b.score - a.score)
+		.slice(0, 3);
+
+	for (const entry of rankedLinked) {
+		entry.snippet = await buildLinkedFileSnippet(entry.path, entry.lines, workspaceFsPath, options.signal);
+	}
+
+	const roleBucket = classifySystemRole(metricsByFile);
+	const roleExplanation = buildRoleExplanation(roleBucket, metricsByFile, rankedLinked);
+
+	const combinedBlocks: string[] = [];
+	if (querySections.length) {
+		combinedBlocks.push(
+			'Graphify Smart Query Context (CLI):',
+			...querySections.map((section) => `\`\`\`text\n${section}\n\`\`\``)
+		);
+	}
+	if (pathSections.length) {
+		combinedBlocks.push(
+			'Graphify Path Evidence (CLI):',
+			...pathSections.map((section) => `\`\`\`text\n${section}\n\`\`\``)
+		);
+	}
+	if (rankedLinked.length) {
+		combinedBlocks.push(
+			'Linked File Context Snippets (Top 3, ~80 lines each):',
+			...rankedLinked.map((entry) => {
+				const rel = toWorkspaceRelative(entry.path, workspaceFsPath);
+				const snippetText = entry.snippet || '(snippet unavailable)';
+				return [
+					`\`\`\`text`,
+					`File: ${rel}`,
+					`Metrics: fanIn=${entry.fanIn}, fanOut=${entry.fanOut}, pathHits=${entry.pathHits}, dependencySpread=${entry.dependencySpreadTags.size}, score=${entry.score}`,
+					snippetText,
+					`\`\`\``
+				].join('\n');
+			})
+		);
+	}
+	combinedBlocks.push(
+		'System Role Inference (Graphify):',
+		`\`\`\`text\nRole: ${roleBucket}\n${roleExplanation}\n\`\`\``
+	);
+	const combined = combinedBlocks.join('\n\n');
+
+	const maxTotalChars = 5000;
+	const text = combined.length > maxTotalChars ? `${combined.slice(0, maxTotalChars)}\n\n[Smart query context truncated]` : combined;
+	const linkedFileIds = rankedLinked.map((entry) => toWorkspaceRelative(entry.path, workspaceFsPath));
+	const fingerprintCore = [
+		`role=${roleBucket}`,
+		...linkedFileIds,
+		...queryOutputs.slice(0, 2).map((item) => item.query),
+		...pathOutputs.slice(0, 2).map((item) => `${item.from}->${item.to}`)
+	].join('|');
+	return { text, linkedFileIds, roleBucket, fingerprintCore };
+}
+
+function collectLinkedMetricsFromOutput(
+	outputText: string,
+	queryLabel: string,
+	metricsByFile: Map<string, LinkedFileMetrics>,
+	activeFsPath: string,
+	fromPathCommand = false
+): void {
+	const mentions = extractGraphifySourceMentions(outputText);
+	const queryKey = queryLabel.toLowerCase();
+	for (const mention of mentions) {
+		const normalized = normalizeFsPath(mention.path);
+		if (!normalized || normalized === activeFsPath) {
+			continue;
+		}
+		const metric = metricsByFile.get(normalized) || {
+			path: normalized,
+			fanIn: 0,
+			fanOut: 0,
+			pathHits: 0,
+			dependencySpreadTags: new Set<string>(),
+			lines: [],
+			score: 0
+		};
+		if (queryKey.includes('what calls') || queryKey.includes('depend on')) {
+			metric.fanIn += 1;
+		}
+		if (queryKey.includes('what does') || queryKey.includes('calls from')) {
+			metric.fanOut += 1;
+		}
+		if (queryKey.includes('connects') || queryKey.includes('architecture flow')) {
+			metric.dependencySpreadTags.add('topology');
+		}
+		if (fromPathCommand || queryKey.startsWith('path:')) {
+			metric.pathHits += 1;
+			metric.dependencySpreadTags.add('path');
+		}
+		if (typeof mention.line === 'number' && Number.isFinite(mention.line)) {
+			metric.lines.push(mention.line);
+		}
+		if (queryKey.includes('what calls')) {
+			metric.dependencySpreadTags.add('incoming-call');
+		}
+		if (queryKey.includes('what does')) {
+			metric.dependencySpreadTags.add('outgoing-call');
+		}
+		metricsByFile.set(normalized, metric);
+	}
+}
+
+function extractGraphifySourceMentions(outputText: string): Array<{ path: string; line?: number }> {
+	const mentions: Array<{ path: string; line?: number }> = [];
+	const nodeRegex = /NODE[^\n]*?\[src=([^\]\r\n]+?)(?:\s+loc=L(\d+))?[^\]]*\]/g;
+	let nodeMatch: RegExpExecArray | null;
+	while ((nodeMatch = nodeRegex.exec(outputText)) !== null) {
+		mentions.push({
+			path: nodeMatch[1]?.trim() || '',
+			line: nodeMatch[2] ? Number.parseInt(nodeMatch[2], 10) : undefined
+		});
+	}
+
+	const srcRegex = /src=([^\]\r\n]+?)(?:\s|]|$)/g;
+	let srcMatch: RegExpExecArray | null;
+	while ((srcMatch = srcRegex.exec(outputText)) !== null) {
+		mentions.push({
+			path: srcMatch[1]?.trim() || ''
+		});
+	}
+	return mentions.filter((item) => Boolean(item.path));
+}
+
+async function buildLinkedFileSnippet(
+	targetFsPath: string,
+	lines: number[],
+	workspaceFsPath: string,
+	signal?: AbortSignal
+): Promise<string | undefined> {
+	if (signal?.aborted) {
+		return undefined;
+	}
+	const normalized = normalizeFsPath(targetFsPath);
+	const workspaceNorm = normalizeFsPath(workspaceFsPath);
+	if (!normalized.startsWith(workspaceNorm)) {
+		return undefined;
+	}
+	try {
+		const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(normalized));
+		const text = new TextDecoder().decode(bytes);
+		const fileLines = text.split(/\r?\n/);
+		if (!fileLines.length) {
+			return undefined;
+		}
+		const center = chooseSnippetCenterLine(lines, fileLines.length);
+		const radius = 40;
+		const start = Math.max(1, center - radius);
+		const end = Math.min(fileLines.length, center + radius - 1);
+		const snippet = fileLines.slice(start - 1, end).map((line, idx) => {
+			const lineNo = start + idx;
+			return `${String(lineNo).padStart(4, ' ')} | ${line}`;
+		});
+		return snippet.join('\n');
+	} catch {
+		return undefined;
+	}
+}
+
+function chooseSnippetCenterLine(lines: number[], max: number): number {
+	const valid = lines.filter((line) => Number.isFinite(line) && line >= 1 && line <= max);
+	if (!valid.length) {
+		return Math.min(max, 40);
+	}
+	const sorted = [...valid].sort((a, b) => a - b);
+	return sorted[Math.floor(sorted.length / 2)] || sorted[0] || 1;
+}
+
+function classifySystemRole(metricsByFile: Map<string, LinkedFileMetrics>): SystemRoleBucket {
+	const all = Array.from(metricsByFile.values());
+	const totalFanIn = all.reduce((sum, item) => sum + item.fanIn, 0);
+	const totalFanOut = all.reduce((sum, item) => sum + item.fanOut, 0);
+	const totalPathHits = all.reduce((sum, item) => sum + item.pathHits, 0);
+	const spread = all.length;
+
+	if ((totalFanIn >= 6 && spread >= 3) || (totalPathHits >= 6 && totalFanIn >= 4)) {
+		return 'big_machine';
+	}
+	if ((totalFanIn >= 3 && totalFanOut >= 2) || spread >= 2) {
+		return 'connector';
+	}
+	return 'small_cog';
+}
+
+function buildRoleExplanation(
+	role: SystemRoleBucket,
+	metricsByFile: Map<string, LinkedFileMetrics>,
+	rankedLinked: LinkedFileMetrics[]
+): string {
+	const all = Array.from(metricsByFile.values());
+	const totalFanIn = all.reduce((sum, item) => sum + item.fanIn, 0);
+	const totalFanOut = all.reduce((sum, item) => sum + item.fanOut, 0);
+	const totalPathHits = all.reduce((sum, item) => sum + item.pathHits, 0);
+	const topLinks = rankedLinked.map((entry) => path.basename(entry.path)).join(', ') || 'none';
+	return [
+		`Reasoning: fanIn=${totalFanIn}, fanOut=${totalFanOut}, pathHits=${totalPathHits}, linkedFiles=${all.length}.`,
+		`Top linked files: ${topLinks}.`,
+		role === 'big_machine'
+			? 'Interpretation: active file appears to be a central orchestrator in the local system graph.'
+			: role === 'connector'
+				? 'Interpretation: active file appears to bridge subsystems and coordinate flows.'
+				: 'Interpretation: active file appears to be a focused leaf/helper component in the local system graph.'
+	].join('\n');
+}
+
+function toWorkspaceRelative(filePath: string, workspaceFsPath: string): string {
+	return path.relative(workspaceFsPath, filePath).replace(/\\/g, '/');
+}
+
+function normalizeFsPath(filePath: string): string {
+	return path.resolve(filePath).replace(/\\/g, '/').toLowerCase();
+}
+
+function buildGraphifySmartQueries(relativePath: string, primarySymbol?: string): string[] {
+	const fileName = path.basename(relativePath);
+	const queries = [
+		`show architecture flow for ${relativePath}`,
+		`what connects ${fileName} to ${primarySymbol || 'the rest of the codebase'}?`,
+		`what modules depend on ${fileName}?`,
+		`what calls ${primarySymbol || fileName}?`,
+		`what does ${primarySymbol || fileName} call?`
+	];
+	return Array.from(new Set(queries.map((item) => item.trim()).filter(Boolean)));
+}
+
+function buildGraphifyPathPairs(relativePath: string, primarySymbol?: string): Array<{ from: string; to: string }> {
+	const fileName = path.basename(relativePath);
+	const candidates: Array<{ from: string; to: string }> = [];
+	if (primarySymbol) {
+		candidates.push({ from: fileName, to: primarySymbol });
+		candidates.push({ from: primarySymbol, to: 'requestModelText' });
+		candidates.push({ from: primarySymbol, to: 'registerPceCommands' });
+	}
+	candidates.push({ from: fileName, to: 'requestModelText' });
+	return candidates.filter((pair, index, arr) => {
+		if (!pair.from || !pair.to || pair.from === pair.to) {
+			return false;
+		}
+		const key = `${pair.from}::${pair.to}`;
+		return arr.findIndex((p) => `${p.from}::${p.to}` === key) === index;
+	});
+}
+
+function guessPrimarySymbol(code: string): string | undefined {
+	const functionMatch = code.match(/(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/);
+	if (functionMatch?.[1]) {
+		return functionMatch[1];
+	}
+	const constFnMatch = code.match(/(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\(/);
+	if (constFnMatch?.[1]) {
+		return constFnMatch[1];
+	}
+	return undefined;
+}
+
+async function runGraphifyQueryCommand(
+	query: string,
+	graphFsPath: string,
+	workspaceFsPath: string,
+	signal?: AbortSignal
+): Promise<GraphifyCommandResult> {
+	return runGraphifyGraphCommand(['query', query, '--graph', graphFsPath], workspaceFsPath, signal);
+}
+
+async function runGraphifyPathCommand(
+	from: string,
+	to: string,
+	graphFsPath: string,
+	workspaceFsPath: string,
+	signal?: AbortSignal
+): Promise<GraphifyCommandResult> {
+	return runGraphifyGraphCommand(['path', from, to, '--graph', graphFsPath], workspaceFsPath, signal);
+}
+
+async function runGraphifyGraphCommand(
+	args: string[],
+	workspaceFsPath: string,
+	signal?: AbortSignal
+): Promise<GraphifyCommandResult> {
+	return new Promise<GraphifyCommandResult>((resolve) => {
+		const child = spawn('graphify', args, {
+			cwd: workspaceFsPath,
+			shell: false
+		});
+
+		let stdout = '';
+		let stderr = '';
+		let settled = false;
+		let timedOut = false;
+		const timeoutMs = 3500;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			if (!child.killed) {
+				child.kill();
+			}
+		}, timeoutMs);
+
+		const onAbort = () => {
+			if (!child.killed) {
+				child.kill();
+			}
+		};
+		if (signal) {
+			signal.addEventListener('abort', onAbort, { once: true });
+		}
+
+		child.stdout.on('data', (chunk: Buffer | string) => {
+			stdout += chunk.toString();
+		});
+		child.stderr.on('data', (chunk: Buffer | string) => {
+			stderr += chunk.toString();
+		});
+
+		child.on('error', (error) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(timer);
+			if (signal) {
+				signal.removeEventListener('abort', onAbort);
+			}
+			resolve({
+				success: false,
+				exitCode: null,
+				stdout,
+				stderr: stderr || String(error?.message ?? error),
+				timedOut
+			});
+		});
+
+		child.on('close', (code) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(timer);
+			if (signal) {
+				signal.removeEventListener('abort', onAbort);
+			}
+			resolve({
+				success: !timedOut && code === 0,
+				exitCode: code,
+				stdout,
+				stderr,
+				timedOut
+			});
+		});
+	});
 }
 
 

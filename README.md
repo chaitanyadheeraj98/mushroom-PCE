@@ -103,6 +103,7 @@ This section explains every control visible in the Circuit Mode HUD, how they di
 - `Mushroom PCE: Select Model` (`mushroom-pce.selectModel`)
 - `Mushroom PCE: Set List Mode` (`mushroom-pce.setListMode`)
 - `Mushroom PCE: Set Developer Mode` (`mushroom-pce.setDeveloperMode`)
+- `Mushroom PCE: Set Definition Mode` (`mushroom-pce.setDefinitionMode`)
 - `Mushroom PCE: Toggle Graphify Context` (`mushroom-pce.toggleGraphifyContext`)
 - `Mushroom PCE: Open Circuit Mode` (`mushroom-pce.openCircuit`)
 - `Mushroom PCE: Open Blueprint` (`mushroom-pce.openBlueprint`)

@@ -7,7 +7,7 @@ export type ModelOption = {
 };
 
 export type SymbolKind = 'function' | 'variable' | 'import';
-export type ResponseMode = 'list' | 'developer';
+export type ResponseMode = 'list' | 'developer' | 'definition';
 
 export type SymbolLocation = {
 	name: string;
@@ -22,4 +22,3 @@ export type SymbolLink = {
 	kind: SymbolKind;
 	commandUri: string;
 };
-

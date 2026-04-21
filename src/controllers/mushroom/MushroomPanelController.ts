@@ -156,6 +156,7 @@ export class MushroomPanel {
 
 		const listActive = this.currentResponseMode === 'list';
 		const developerActive = this.currentResponseMode === 'developer';
+		const definitionActive = this.currentResponseMode === 'definition';
 		const graphifyActive = this.graphifyContextEnabled;
 		const warningHtml = this.languageWarning
 			? `<div class="warning-card">${escapeHtml(this.languageWarning)}</div>`
@@ -431,10 +432,11 @@ export class MushroomPanel {
     </div>
     <div class="mode-card">
       <div class="mode-title">Response Mode</div>
-      <div class="mode-current">${listActive ? 'List Mode' : 'Developer Mode'}</div>
+      <div class="mode-current">${listActive ? 'List Mode' : definitionActive ? 'Definition Mode' : 'Developer Mode'}</div>
       <div class="mode-actions">
         <a class="mode-pill ${listActive ? 'active' : ''}" href="command:mushroom-pce.setListMode">List Mode</a>
         <a class="mode-pill ${developerActive ? 'active' : ''}" href="command:mushroom-pce.setDeveloperMode">Developer Mode</a>
+        <a class="mode-pill ${definitionActive ? 'active' : ''}" href="command:mushroom-pce.setDefinitionMode">Definition Mode</a>
         <a class="mode-pill ${graphifyActive ? 'graphify-active' : ''}" href="command:mushroom-pce.toggleGraphifyContext">
           Graphify Context: ${graphifyActive ? 'On' : 'Off'}
         </a>
