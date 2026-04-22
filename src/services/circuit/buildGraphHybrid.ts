@@ -6,6 +6,10 @@ import { CircuitEdge, CircuitGraph, CircuitLayer, CircuitNode } from '../../shar
 type NodeMap = Map<string, CircuitNode>;
 
 export async function buildCircuitGraphHybrid(document: vscode.TextDocument): Promise<CircuitGraph> {
+	if (isDeclarationFileUri(document.uri)) {
+		return buildDeclarationFileHintGraph(document);
+	}
+
 	// Fallback graph from existing static analysis (AST/regex heuristics).
 	const fallbackGraph = buildCircuitGraph(document);
 	const nodes: CircuitNode[] = [...fallbackGraph.nodes];
@@ -222,10 +226,55 @@ function isWorkspaceUri(uri: vscode.Uri): boolean {
 
 function isTypeScriptLibFile(uri: vscode.Uri): boolean {
 	const p = uri.fsPath.replace(/\\/g, '/').toLowerCase();
+	if (isDeclarationFilePath(p)) {
+		return true;
+	}
 	if (p.includes('/typescript/lib/') && /\/lib\..*\.d\.ts$/.test(p)) {
 		return true;
 	}
 	return /\/lib\..*\.d\.ts$/.test(p);
+}
+
+function isDeclarationFileUri(uri: vscode.Uri): boolean {
+	return isDeclarationFilePath(uri.fsPath.replace(/\\/g, '/').toLowerCase());
+}
+
+function isDeclarationFilePath(pathText: string): boolean {
+	return /\.d\.ts$/i.test(pathText);
+}
+
+function buildDeclarationFileHintGraph(document: vscode.TextDocument): CircuitGraph {
+	const uri = document.uri.toString();
+	const rootId = `module:decl:${uri}`;
+	const hintId = `utility:decl-hint:${uri}`;
+	return {
+		nodes: [
+			{
+				id: rootId,
+				type: 'module',
+				layer: 'utility',
+				label: document.fileName.split(/[\\/]/).pop() || '.d.ts file',
+				uri,
+				detail: 'TypeScript declaration file (.d.ts)'
+			},
+			{
+				id: hintId,
+				type: 'utility',
+				layer: 'utility',
+				label: 'Declaration file ignored',
+				detail: 'Circuit Mode ignores .d.ts files and focuses on runtime/product source files.'
+			}
+		],
+		edges: [
+			{
+				id: 'e:0',
+				kind: 'architecture',
+				from: rootId,
+				to: hintId,
+				label: 'hint'
+			}
+		]
+	};
 }
 
 async function safeCallHierarchyPrepare(uri: vscode.Uri, position: vscode.Position): Promise<vscode.CallHierarchyItem[]> {

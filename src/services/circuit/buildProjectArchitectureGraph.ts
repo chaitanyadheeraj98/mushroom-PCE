@@ -30,7 +30,7 @@ export async function buildProjectArchitectureGraph(
 	const include = '**/*.{ts,tsx,js,jsx,mjs,cjs,py,go,java,cs,rb,php,rs,json}';
 	const exclude = '**/{node_modules,dist,out,build,.git,.next,.turbo,coverage,target}/**';
 	const files = await vscode.workspace.findFiles(include, exclude, maxFiles);
-	const codeFiles = files.filter(isLikelyCodeUri);
+	const codeFiles = files.filter((uri) => isLikelyCodeUri(uri) && !isDeclarationFileUri(uri));
 	const fileIndex = new Map<string, vscode.Uri>();
 	for (const fileUri of codeFiles) {
 		fileIndex.set(path.normalize(fileUri.fsPath).toLowerCase(), fileUri);
@@ -165,6 +165,9 @@ export async function buildProjectArchitectureGraph(
 async function collectCallHierarchyFileNeighbors(anchorUri: vscode.Uri): Promise<{ incoming: Set<string>; outgoing: Set<string> }> {
 	const incoming = new Set<string>();
 	const outgoing = new Set<string>();
+	if (isDeclarationFileUri(anchorUri)) {
+		return { incoming, outgoing };
+	}
 	const doc = await safeOpenDocument(anchorUri);
 	if (!doc) {
 		return { incoming, outgoing };
@@ -324,10 +327,21 @@ function isWorkspaceUri(uri: vscode.Uri): boolean {
 
 function isTypeScriptLibFile(uri: vscode.Uri): boolean {
 	const p = uri.fsPath.replace(/\\/g, '/').toLowerCase();
+	if (isDeclarationFilePath(p)) {
+		return true;
+	}
 	if (p.includes('/typescript/lib/') && /\/lib\..*\.d\.ts$/.test(p)) {
 		return true;
 	}
 	return /\/lib\..*\.d\.ts$/.test(p);
+}
+
+function isDeclarationFileUri(uri: vscode.Uri): boolean {
+	return isDeclarationFilePath(uri.fsPath.replace(/\\/g, '/').toLowerCase());
+}
+
+function isDeclarationFilePath(pathText: string): boolean {
+	return /\.d\.ts$/i.test(pathText);
 }
 
 function extractModuleSpecifiers(text: string, languageId: string): string[] {

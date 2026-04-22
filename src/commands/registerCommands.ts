@@ -6,6 +6,7 @@ import { buildCircuitGraphHybrid } from '../services/circuit/buildGraphHybrid';
 import { buildProjectArchitectureGraph } from '../services/circuit/buildProjectArchitectureGraph';
 import { CircuitPanel } from '../controllers/circuit/CircuitPanelController';
 import { buildGlobalSkeletonGraph } from '../services/circuit/buildSkeletonGraph';
+import { enrichCircuitGraphWithGraphifyContext } from '../services/circuit/graphifyCircuitContext';
 import { MushroomPanel } from '../controllers/mushroom/MushroomPanelController';
 import { ResponseMode } from '../shared/types/appTypes';
 import { CircuitAiEnrichmentResult, CircuitGraph } from '../shared/types/circuitTypes';
@@ -191,7 +192,14 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 			return;
 		}
 
-		const graph = await buildCircuitGraphHybrid(doc);
+		const baseGraph = await buildCircuitGraphHybrid(doc);
+		const graph = deps.getGraphifyContextEnabled()
+			? await enrichCircuitGraphWithGraphifyContext(baseGraph, {
+				scope: 'current-file',
+				document: doc,
+				output: deps.output
+			})
+			: baseGraph;
 		CircuitPanel.createOrShow(
 			deps.extensionUri,
 			graph,
@@ -203,23 +211,31 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 			},
 			async (node, currentGraph) => buildGlobalSkeletonGraph(node, currentGraph, 3),
 			async (scope, _currentGraph, options) => {
-				if (scope === 'full-architecture') {
-					return buildProjectArchitectureGraph(deps.getCurrentDocument(), {
-						dependencyMode: options?.dependencyMode === 'imports-calls' ? 'imports-calls' : 'imports'
-					});
-				}
-				if (scope === 'codeflow') {
-					const currentDoc = deps.getCurrentDocument();
-					if (!currentDoc) {
-						return undefined;
-					}
-					return buildCodeFlowGraph(currentDoc);
-				}
 				const currentDoc = deps.getCurrentDocument();
 				if (!currentDoc) {
 					return undefined;
 				}
-				return buildCircuitGraphHybrid(currentDoc);
+				let nextGraph: CircuitGraph | undefined;
+				if (scope === 'full-architecture') {
+					nextGraph = await buildProjectArchitectureGraph(currentDoc, {
+						dependencyMode: options?.dependencyMode === 'imports-calls' ? 'imports-calls' : 'imports'
+					});
+				} else if (scope === 'codeflow') {
+					nextGraph = buildCodeFlowGraph(currentDoc);
+				} else {
+					nextGraph = await buildCircuitGraphHybrid(currentDoc);
+				}
+				if (!nextGraph) {
+					return undefined;
+				}
+				if (!deps.getGraphifyContextEnabled()) {
+					return nextGraph;
+				}
+				return enrichCircuitGraphWithGraphifyContext(nextGraph, {
+					scope,
+					document: currentDoc,
+					output: deps.output
+				});
 			},
 			async (currentGraph) => {
 				return deps.requestCircuitAiEnrichment(currentGraph);
