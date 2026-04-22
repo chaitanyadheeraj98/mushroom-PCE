@@ -121,12 +121,7 @@ src/
 
   commands/
     registerCommands.ts
-    analyzeActiveCommand.ts
     startPceCommand.ts
-    selectModelCommand.ts
-    setListModeCommand.ts
-    setDeveloperModeCommand.ts
-    goToSymbolCommand.ts
     openCircuitCommand.ts
 
   controllers/
@@ -215,7 +210,27 @@ Useful scripts:
 - `npm run watch`
 - `npm run check-types`
 - `npm run lint`
+- `npm run lint:fix`
 - `npm run test`
+
+Pre-commit quality gate:
+
+- Husky + lint-staged is configured for this repo.
+- On `git commit`, staged `*.ts`/`*.tsx` files run through `eslint --fix --max-warnings=0`.
+- Commits are blocked if lint errors remain.
+
+Reusable bootstrap for other projects:
+
+- Run this from this repo and point it to any JS/TS project folder:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-quality.ps1 -ProjectPath "D:\path\to\your-project"
+```
+- What it does:
+  - Installs `husky` + `lint-staged` as dev dependencies
+  - Adds/updates `prepare` and `lint:fix` scripts in `package.json`
+  - Adds a `lint-staged` rule for `*.{js,jsx,ts,tsx}`
+  - Creates `.husky/pre-commit` with `npx lint-staged`
+  - Sets `git config core.hooksPath .husky` when the target is a git repo
 
 ## Notes
 
