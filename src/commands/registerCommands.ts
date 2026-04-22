@@ -32,7 +32,10 @@ type RegisterCommandsDeps = {
 	tryRestoreCachedAnalysis: (panel: MushroomPanel) => Promise<boolean>;
 	runAnalysis: (panel: MushroomPanel) => Promise<void>;
 	askNodeQuestion: (request: NodeChatRequest) => Promise<string>;
-	requestCircuitAiEnrichment: (graph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>;
+	requestCircuitAiEnrichment: (
+		graph: CircuitGraph,
+		scope?: 'current-file' | 'full-architecture' | 'codeflow'
+	) => Promise<CircuitAiEnrichmentResult | undefined>;
 	requestCircuitRelationExplain: (graph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>;
 	openBlueprintPanel: () => Promise<void>;
 };
@@ -178,6 +181,8 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 				deps.applyGraphifyStateToPanel(panel);
 				await deps.tryRestoreCachedAnalysis(panel);
 			}
+			CircuitPanel.setGraphifyContextEnabled(next);
+			CircuitDetailsPanel.setGraphifyContextEnabled(next);
 			vscode.window.showInformationMessage(
 				`Mushroom PCE Graphify context ${next ? 'enabled' : 'disabled'}.`
 			);
@@ -207,7 +212,9 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 				if (node?.uri && typeof node.line === 'number' && typeof node.character === 'number') {
 					await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
 				}
-				await CircuitDetailsPanel.createOrShow(node, currentGraph, deps.askNodeQuestion);
+				await CircuitDetailsPanel.createOrShow(node, currentGraph, deps.askNodeQuestion, {
+					graphifyContextEnabled: deps.getGraphifyContextEnabled()
+				});
 			},
 			async (node, currentGraph) => buildGlobalSkeletonGraph(node, currentGraph, 3),
 			async (scope, _currentGraph, options) => {
@@ -237,11 +244,14 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 					output: deps.output
 				});
 			},
-			async (currentGraph) => {
-				return deps.requestCircuitAiEnrichment(currentGraph);
+			async (currentGraph, scope) => {
+				return deps.requestCircuitAiEnrichment(currentGraph, scope);
 			},
 			async (currentGraph, fromNodeId, toNodeId) => {
 				return deps.requestCircuitRelationExplain(currentGraph, fromNodeId, toNodeId);
+			},
+			{
+				initialGraphifyContextEnabled: deps.getGraphifyContextEnabled()
 			}
 		);
 	});

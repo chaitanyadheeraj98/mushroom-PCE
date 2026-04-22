@@ -12,6 +12,7 @@ export const circuitBody = `<div id="hud">
     </div>
     <div class="card hud-main-card">
       <div class="title">Circuit Mode</div>
+      <div id="graphifyContextIndicator" class="graphify-pill off">Graphify Context: Off</div>
       <div class="muted">Double-click to toggle Hand mode (pan). Hold Space + drag for temporary pan. Press F to fit graph in view. Drag nodes to rearrange. Scroll to zoom. In Runtime CodeFlow, click an output port then click Context Bot to wire context (repeat same action to detach).</div>
       <div class="hud-sections">
         <div class="hud-section">

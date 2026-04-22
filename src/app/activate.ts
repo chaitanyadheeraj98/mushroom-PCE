@@ -15,8 +15,9 @@ import { CircuitDetailsPanel, NodeChatRequest } from '../controllers/circuit/Cir
 import { detectLanguageMismatchWarning } from '../services/language/detectLanguageWarning';
 import { registerPceCommands } from '../commands/registerCommands';
 import { enrichCircuitGraphWithAi } from '../services/circuit/ai/enrichCircuitGraph';
-import { CircuitAiEnrichmentResult, CircuitGraph } from '../shared/types/circuitTypes';
+import { CircuitAiEnrichmentResult, CircuitGraph, CircuitNode, NodeGraphifyEvidenceResult } from '../shared/types/circuitTypes';
 import { explainCircuitNodeRelationWithAi } from '../services/circuit/ai/explainNodeRelation';
+import { getNodeGraphifyEvidence } from '../services/graphify/nodeContextEngine';
 import {
 	BlueprintConversationTurn,
 	BlueprintPlanningArtifacts,
@@ -425,14 +426,31 @@ export function activateApp(context: vscode.ExtensionContext) {
 					}
 				}
 
+				if (graphifyContextEnabled) {
+					request.graphifyEvidence = await loadNodeGraphifyEvidence({
+						node: request.node,
+						scope: 'current-file',
+						signal
+					});
+				}
+
 				const prompt = buildNodeDetailsPrompt(request);
 				const responseText = await requestModelText(model, prompt, { signal });
+				if (request.graphifyEvidence?.status === 'fallback') {
+					return [
+						'Graphify node evidence unavailable; using structural fallback.',
+						responseText || 'No response generated.'
+					].join('\n\n');
+				}
 				return responseText || 'No response generated.';
 			}
 		});
 	};
 
-	const requestCircuitAiEnrichment = async (graph: CircuitGraph): Promise<CircuitAiEnrichmentResult | undefined> => {
+	const requestCircuitAiEnrichment = async (
+		graph: CircuitGraph,
+		scope: 'current-file' | 'full-architecture' | 'codeflow' = 'current-file'
+	): Promise<CircuitAiEnrichmentResult | undefined> => {
 		await loadModels();
 		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
 		if (!model) {
@@ -441,6 +459,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 
 		const signature = JSON.stringify({
 			modelId: model.id,
+			scope,
+			graphifyContextEnabled,
 			nodes: graph.nodes.map((node) => ({
 				id: node.id,
 				label: node.label,
@@ -466,7 +486,26 @@ export function activateApp(context: vscode.ExtensionContext) {
 			key: `circuit-ai-enrich:${signature}`,
 			group: 'circuit-ai:enrich',
 			priority: 20,
-			run: async (signal) => enrichCircuitGraphWithAi(model, graph, signal)
+			run: async (signal) => {
+				const graphifyEvidence = graphifyContextEnabled
+					? await loadCircuitGraphifyEvidence(graph, scope, signal)
+					: undefined;
+				return enrichCircuitGraphWithAi(
+					model,
+					graph,
+					{
+						graphifyEvidenceText: graphifyEvidence?.compactText,
+						graphifyEvidenceStatus: graphifyContextEnabled
+							? graphifyEvidence?.status ?? 'fallback'
+							: 'off',
+						graphifyEvidenceMessage:
+							graphifyEvidence?.status === 'fallback'
+								? graphifyEvidence.fallbackReason || 'Graphify node evidence unavailable; using structural fallback.'
+								: undefined
+					},
+					signal
+				);
+			}
 		});
 		if (result) {
 			circuitAiCache.set(signature, result);
@@ -492,6 +531,135 @@ export function activateApp(context: vscode.ExtensionContext) {
 			priority: 25,
 			run: async (signal) => explainCircuitNodeRelationWithAi(model, graph, fromNodeId, toNodeId, signal)
 		});
+	};
+
+	const loadNodeGraphifyEvidence = async ({
+		node,
+		scope,
+		targetNode,
+		signal
+	}: {
+		node: CircuitNode;
+		scope: 'current-file' | 'full-architecture' | 'codeflow';
+		targetNode?: CircuitNode;
+		signal?: AbortSignal;
+	}): Promise<NodeGraphifyEvidenceResult | undefined> => {
+		if (!graphifyContextEnabled) {
+			return undefined;
+		}
+		const currentDoc = getCurrentDocument();
+		const workspaceFolder =
+			getNodeWorkspaceFolder(node) || (currentDoc ? vscode.workspace.getWorkspaceFolder(currentDoc.uri) : undefined);
+		if (!workspaceFolder) {
+			return {
+				incoming: [],
+				outgoing: [],
+				paths: [],
+				topLinkedFiles: [],
+				summary: 'Graphify node evidence unavailable; using structural fallback.',
+				status: 'fallback',
+				fallbackReason: 'No workspace folder available.',
+				compactText: 'Graphify node evidence unavailable; using structural fallback.'
+			};
+		}
+		const graphFsPath = path.resolve(workspaceFolder.uri.fsPath, 'graphify-out', 'graph.json');
+		return getNodeGraphifyEvidence({
+			workspaceFsPath: workspaceFolder.uri.fsPath,
+			graphFsPath,
+			scope,
+			node,
+			targetNode,
+			output,
+			signal
+		});
+	};
+
+	const loadCircuitGraphifyEvidence = async (
+		graph: CircuitGraph,
+		scope: 'current-file' | 'full-architecture' | 'codeflow',
+		signal?: AbortSignal
+	): Promise<NodeGraphifyEvidenceResult | undefined> => {
+		if (!graphifyContextEnabled || !graph.nodes.length) {
+			return undefined;
+		}
+		const currentDoc = getCurrentDocument();
+		const workspaceFolder = currentDoc ? vscode.workspace.getWorkspaceFolder(currentDoc.uri) : undefined;
+		if (!workspaceFolder) {
+			return {
+				incoming: [],
+				outgoing: [],
+				paths: [],
+				topLinkedFiles: [],
+				summary: 'Graphify node evidence unavailable; using structural fallback.',
+				status: 'fallback',
+				fallbackReason: 'No workspace folder available.',
+				compactText: 'Graphify node evidence unavailable; using structural fallback.'
+			};
+		}
+		const candidates = pickHighPriorityCircuitNodes(graph, 3);
+		if (!candidates.length) {
+			return {
+				incoming: [],
+				outgoing: [],
+				paths: [],
+				topLinkedFiles: [],
+				summary: 'Graphify node evidence unavailable; using structural fallback.',
+				status: 'fallback',
+				fallbackReason: 'No circuit nodes available for evidence extraction.',
+				compactText: 'Graphify node evidence unavailable; using structural fallback.'
+			};
+		}
+		const primary = candidates[0];
+		const target = candidates[1];
+		const graphFsPath = path.resolve(workspaceFolder.uri.fsPath, 'graphify-out', 'graph.json');
+		const collected: NodeGraphifyEvidenceResult[] = [];
+		for (let i = 0; i < candidates.length; i++) {
+			const evidence = await getNodeGraphifyEvidence({
+				workspaceFsPath: workspaceFolder.uri.fsPath,
+				graphFsPath,
+				scope,
+				node: candidates[i],
+				targetNode: i === 0 ? target : primary,
+				output,
+				signal
+			});
+			collected.push(evidence);
+		}
+
+		const successful = collected.filter((item) => item.status === 'ok');
+		if (!successful.length) {
+			const firstReason = collected[0]?.fallbackReason || 'No query/path evidence available.';
+			return {
+				incoming: [],
+				outgoing: [],
+				paths: [],
+				topLinkedFiles: [],
+				summary: 'Graphify node evidence unavailable; using structural fallback.',
+				status: 'fallback',
+				fallbackReason: firstReason,
+				compactText: 'Graphify node evidence unavailable; using structural fallback.'
+			};
+		}
+
+		const incoming = dedupeNeighborEvidence(successful.flatMap((item) => item.incoming)).slice(0, 12);
+		const outgoing = dedupeNeighborEvidence(successful.flatMap((item) => item.outgoing)).slice(0, 12);
+		const paths = dedupePathEvidence(successful.flatMap((item) => item.paths)).slice(0, 8);
+		const topLinkedFiles = dedupeLinkedFiles(successful.flatMap((item) => item.topLinkedFiles)).slice(0, 6);
+		const compactText = capGraphifyEvidenceText(
+			successful
+				.map((item, idx) => `Node ${idx + 1}: ${item.summary}\n${item.compactText}`)
+				.join('\n\n'),
+			4800
+		);
+		return {
+			incoming,
+			outgoing,
+			paths,
+			topLinkedFiles,
+			summary: `Aggregated Graphify node evidence for ${successful.length} priority node(s).`,
+			status: 'ok',
+			compactText
+		};
 	};
 
 	const openBlueprintPanel = async (): Promise<void> => {
@@ -726,6 +894,78 @@ async function explainCode(
 		vscode.window.showErrorMessage('Error: ' + error.message);
 		return;
 	}
+}
+
+function getNodeWorkspaceFolder(node: CircuitNode): vscode.WorkspaceFolder | undefined {
+	if (!node.uri) {
+		return undefined;
+	}
+	try {
+		return vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(node.uri));
+	} catch {
+		return undefined;
+	}
+}
+
+function pickHighPriorityCircuitNodes(graph: CircuitGraph, maxCount: number): CircuitNode[] {
+	const degree = new Map<string, number>();
+	for (const edge of graph.edges) {
+		degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1);
+		degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1);
+	}
+	return [...graph.nodes]
+		.filter((node) => node.type !== 'sink')
+		.sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0))
+		.slice(0, maxCount);
+}
+
+function dedupeNeighborEvidence(
+	items: NodeGraphifyEvidenceResult['incoming']
+): NodeGraphifyEvidenceResult['incoming'] {
+	const seen = new Set<string>();
+	const out: NodeGraphifyEvidenceResult['incoming'] = [];
+	for (const item of items) {
+		const key = `${item.node.toLowerCase()}|${item.relation.toLowerCase()}`;
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		out.push(item);
+	}
+	return out;
+}
+
+function dedupePathEvidence(items: NodeGraphifyEvidenceResult['paths']): NodeGraphifyEvidenceResult['paths'] {
+	const seen = new Set<string>();
+	const out: NodeGraphifyEvidenceResult['paths'] = [];
+	for (const item of items) {
+		const key = `${item.from.toLowerCase()}|${item.to.toLowerCase()}|${item.summary.toLowerCase()}`;
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		out.push(item);
+	}
+	return out;
+}
+
+function dedupeLinkedFiles(
+	items: NodeGraphifyEvidenceResult['topLinkedFiles']
+): NodeGraphifyEvidenceResult['topLinkedFiles'] {
+	const scoreByPath = new Map<string, number>();
+	for (const item of items) {
+		scoreByPath.set(item.path, Math.max(scoreByPath.get(item.path) ?? 0, item.score));
+	}
+	return Array.from(scoreByPath.entries())
+		.map(([pathValue, score]) => ({ path: pathValue, score, source: 'graphify' }))
+		.sort((a, b) => b.score - a.score);
+}
+
+function capGraphifyEvidenceText(text: string, maxChars: number): string {
+	if (text.length <= maxChars) {
+		return text;
+	}
+	return `${text.slice(0, maxChars)}\n\n[Graphify node evidence truncated]`;
 }
 
 type SystemRoleBucket = 'big_machine' | 'connector' | 'small_cog';

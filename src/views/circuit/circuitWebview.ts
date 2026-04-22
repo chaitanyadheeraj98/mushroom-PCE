@@ -9,13 +9,18 @@ export function buildCircuitPanelHtml(
 	webview: vscode.Webview,
 	extensionUri: vscode.Uri,
 	graph: CircuitGraph,
-	options?: { initialSkeletonRootNodeId?: string; initialViewMode?: 'architecture' | 'runtime' }
+	options?: {
+		initialSkeletonRootNodeId?: string;
+		initialViewMode?: 'architecture' | 'runtime';
+		initialGraphifyContextEnabled?: boolean;
+	}
 ): string {
 	const nonce = getNonce();
 	const cspSource = webview.cspSource;
 	const graphJson = JSON.stringify(graph).replace(/</g, '\\u003c');
 	const initialSkeletonRootNodeIdJson = JSON.stringify(options?.initialSkeletonRootNodeId ?? null);
 	const initialViewModeJson = JSON.stringify(options?.initialViewMode ?? null);
+	const initialGraphifyContextEnabledJson = JSON.stringify(Boolean(options?.initialGraphifyContextEnabled));
 
 	const threeUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'node_modules', 'three', 'build', 'three.module.js'));
 	let jsmBaseUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'node_modules', 'three', 'examples', 'jsm')).toString();
@@ -23,7 +28,12 @@ export function buildCircuitPanelHtml(
 		jsmBaseUri += '/';
 	}
 
-	const script = buildCircuitWebviewScript(graphJson, initialSkeletonRootNodeIdJson, initialViewModeJson);
+	const script = buildCircuitWebviewScript(
+		graphJson,
+		initialSkeletonRootNodeIdJson,
+		initialViewModeJson,
+		initialGraphifyContextEnabledJson
+	);
 	return buildCircuitHtml({
 		cspSource,
 		nonce,

@@ -3,6 +3,12 @@ import * as vscode from 'vscode';
 import { requestModelText } from '../../ai/requestModelText';
 import { CircuitAiEnrichmentResult, CircuitAiSuggestedEdge, CircuitGraph } from '../../../shared/types/circuitTypes';
 
+type EnrichGraphWithAiOptions = {
+	graphifyEvidenceText?: string;
+	graphifyEvidenceStatus?: 'ok' | 'fallback' | 'off';
+	graphifyEvidenceMessage?: string;
+};
+
 type EnrichmentEnvelope = {
 	nodeSummaries?: Array<{ nodeId?: string; summary?: string; confidence?: number }>;
 	insights?: Array<{ title?: string; detail?: string; confidence?: number }>;
@@ -19,6 +25,7 @@ type EnrichmentEnvelope = {
 export async function enrichCircuitGraphWithAi(
 	model: vscode.LanguageModelChat,
 	graph: CircuitGraph,
+	options?: EnrichGraphWithAiOptions,
 	signal?: AbortSignal
 ): Promise<CircuitAiEnrichmentResult | undefined> {
 	const compact = buildCompactGraphContext(graph);
@@ -32,7 +39,7 @@ export async function enrichCircuitGraphWithAi(
 		};
 	}
 
-	const prompt = buildPrompt(compact);
+	const prompt = buildPrompt(compact, options);
 	const response = await requestModelText(model, prompt, { signal });
 	const parsed = tryParseEnvelope(response || '');
 	if (!parsed) {
@@ -84,7 +91,9 @@ export async function enrichCircuitGraphWithAi(
 		insights,
 		suggestedEdges,
 		modelLabel: model.name,
-		generatedAt: Date.now()
+		generatedAt: Date.now(),
+		graphifyEvidenceStatus: options?.graphifyEvidenceStatus ?? 'off',
+		graphifyEvidenceMessage: options?.graphifyEvidenceMessage
 	};
 }
 
@@ -119,7 +128,20 @@ function buildCompactGraphContext(graph: CircuitGraph): {
 function buildPrompt(compact: {
 	nodes: Array<{ id: string; label: string; type: string; layer?: string; detail?: string }>;
 	edges: Array<{ from: string; to: string; kind: string; label?: string }>;
-}): string {
+}, options?: EnrichGraphWithAiOptions): string {
+	const graphifyEvidenceBlock = options?.graphifyEvidenceText?.trim()
+		? `
+Graphify Node Evidence (authoritative, node-scoped):
+${options.graphifyEvidenceText.trim()}
+`
+		: '';
+	const graphifyFallbackBlock =
+		options?.graphifyEvidenceStatus === 'fallback'
+			? `
+Graphify node evidence unavailable; using structural fallback.
+Reason: ${options.graphifyEvidenceMessage || 'No query/path evidence available.'}
+`
+			: '';
 	return `
 You are an expert software architecture assistant.
 
@@ -149,9 +171,12 @@ RULES:
 - Suggested edges must only use existing node IDs from input.
 - Suggest only meaningful missing relationships, not duplicates.
 - Keep reason short and concrete.
+- If Graphify evidence is present, prioritize it over uncertain graph-only assumptions.
 
 GRAPH:
 ${JSON.stringify(compact)}
+${graphifyEvidenceBlock}
+${graphifyFallbackBlock}
 `;
 }
 

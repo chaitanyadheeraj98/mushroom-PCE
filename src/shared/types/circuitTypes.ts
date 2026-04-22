@@ -72,10 +72,42 @@ export type CircuitAiSuggestedEdge = {
 	reason: string;
 };
 
+export type NodeGraphifyNeighborEvidence = {
+	node: string;
+	relation: string;
+	source: string;
+};
+
+export type NodeGraphifyPathEvidence = {
+	from: string;
+	to: string;
+	summary: string;
+	source: string;
+};
+
+export type NodeGraphifyLinkedFileEvidence = {
+	path: string;
+	score: number;
+	source: string;
+};
+
+export type NodeGraphifyEvidenceResult = {
+	incoming: NodeGraphifyNeighborEvidence[];
+	outgoing: NodeGraphifyNeighborEvidence[];
+	paths: NodeGraphifyPathEvidence[];
+	topLinkedFiles: NodeGraphifyLinkedFileEvidence[];
+	summary: string;
+	status: 'ok' | 'fallback';
+	fallbackReason?: string;
+	compactText: string;
+};
+
 export type CircuitAiEnrichmentResult = {
 	nodeSummaries: CircuitAiNodeSummary[];
 	insights: CircuitAiInsight[];
 	suggestedEdges: CircuitAiSuggestedEdge[];
 	modelLabel?: string;
 	generatedAt: number;
+	graphifyEvidenceStatus?: 'ok' | 'fallback' | 'off';
+	graphifyEvidenceMessage?: string;
 };

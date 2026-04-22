@@ -6,7 +6,8 @@ export type CircuitWebviewMessage =
 	| { type: 'viewNode'; nodeId: string }
 	| { type: 'requestGraph'; scope: 'current-file' | 'full-architecture' | 'codeflow'; dependencyMode?: 'imports' | 'imports-calls' }
 	| { type: 'updateGraph'; graph: CircuitGraph }
-	| { type: 'requestAiEnrichment' }
+	| { type: 'requestAiEnrichment'; scope?: 'current-file' | 'full-architecture' | 'codeflow' }
 	| { type: 'aiEnrichment'; result?: CircuitAiEnrichmentResult; error?: string }
+	| { type: 'graphifyContextState'; enabled: boolean }
 	| { type: 'requestAiRelationExplain'; fromNodeId: string; toNodeId: string }
 	| { type: 'aiRelationExplain'; fromNodeId: string; toNodeId: string; text?: string; error?: string };

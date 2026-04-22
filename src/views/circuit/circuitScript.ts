@@ -1,7 +1,8 @@
 export function buildCircuitWebviewScript(
 	graphJson: string,
 	initialSkeletonRootNodeIdJson: string,
-	initialViewModeJson: string
+	initialViewModeJson: string,
+	initialGraphifyContextEnabledJson: string
 ): string {
 	return `
     let THREE;
@@ -47,6 +48,7 @@ export function buildCircuitWebviewScript(
     const modeHint = document.getElementById('modeHint');
     const aiInsightsEl = document.getElementById('aiInsights');
     const aiSuggestionsEl = document.getElementById('aiSuggestions');
+    const graphifyContextIndicator = document.getElementById('graphifyContextIndicator');
     const viewLockBtn = document.getElementById('viewLockBtn');
     const hudMinBtn = document.getElementById('hudMinBtn');
     const hudMaxBtn = document.getElementById('hudMaxBtn');
@@ -70,6 +72,7 @@ export function buildCircuitWebviewScript(
     let aiSuggestedEdgesPending = [];
     let relationFromNodeId = null;
     let relationToNodeId = null;
+    let graphifyContextEnabled = ${initialGraphifyContextEnabledJson};
 
     try {
       const saved = vscode?.getState?.();
@@ -1701,6 +1704,15 @@ export function buildCircuitWebviewScript(
         .join('<hr class="ai-md-sep" />');
     }
 
+    function updateGraphifyContextIndicator() {
+      if (!graphifyContextIndicator) {
+        return;
+      }
+      graphifyContextIndicator.textContent = 'Graphify Context: ' + (graphifyContextEnabled ? 'On' : 'Off');
+      graphifyContextIndicator.classList.toggle('on', !!graphifyContextEnabled);
+      graphifyContextIndicator.classList.toggle('off', !graphifyContextEnabled);
+    }
+
     function escapeHtmlText(text) {
       return String(text || '')
         .replace(/&/g, '&amp;')
@@ -2000,7 +2012,7 @@ export function buildCircuitWebviewScript(
       const previous = aiEnrichBtn.textContent;
       aiEnrichBtn.textContent = 'Thinking...';
       aiEnrichBtn.disabled = true;
-      vscode.postMessage({ type: 'requestAiEnrichment' });
+      vscode.postMessage({ type: 'requestAiEnrichment', scope: currentGraphScope });
       setTimeout(() => {
         aiEnrichBtn.textContent = previous;
         aiEnrichBtn.disabled = false;
@@ -2552,6 +2564,11 @@ export function buildCircuitWebviewScript(
         buildGraphScene(graph);
         return;
       }
+      if (msg && msg.type === 'graphifyContextState') {
+        graphifyContextEnabled = !!msg.enabled;
+        updateGraphifyContextIndicator();
+        return;
+      }
       if (msg && msg.type === 'aiEnrichment') {
         if (msg.error) {
           aiLastInsightsText = 'AI Insights failed: ' + String(msg.error);
@@ -2579,6 +2596,11 @@ export function buildCircuitWebviewScript(
         }
         const generatedAt = result?.generatedAt ? new Date(result.generatedAt).toLocaleTimeString() : '';
         const model = result?.modelLabel ? String(result.modelLabel) : 'selected model';
+        const graphifyStatus = String(result?.graphifyEvidenceStatus || '');
+        const graphifyMessage = String(result?.graphifyEvidenceMessage || '');
+        if (graphifyStatus === 'fallback') {
+          lines.unshift('* Graphify: ' + (graphifyMessage || 'Graphify node evidence unavailable; using structural fallback.'));
+        }
         aiLastInsightsText =
           'AI Insights [' + model + '] ' + (generatedAt ? 'at ' + generatedAt : '') + '\\n' +
           (lines.length ? lines.join('\\n') : 'No strong insights found.');
@@ -2924,6 +2946,7 @@ export function buildCircuitWebviewScript(
     updateModeUi();
     updateRelationUi();
     renderAiSuggestionQueue();
+    updateGraphifyContextIndicator();
     applySceneThemeByMode();
     if (skeletonRootNodeId) {
       viewMode = 'runtime';

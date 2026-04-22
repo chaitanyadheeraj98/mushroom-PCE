@@ -1,6 +1,6 @@
 ﻿import * as vscode from 'vscode';
 
-import { CircuitEdge, CircuitGraph, CircuitNode } from '../../shared/types/circuitTypes';
+import { CircuitEdge, CircuitGraph, CircuitNode, NodeGraphifyEvidenceResult } from '../../shared/types/circuitTypes';
 import { NormalizedDocumentSymbol, getNormalizedDocumentSymbols } from '../../services/symbols/documentSymbols';
 
 const FILE_SNIPPET_MAX_LINES = 400;
@@ -21,6 +21,7 @@ export type NodeChatRequest = {
 		incoming: string[];
 		outgoing: string[];
 	};
+	graphifyEvidence?: NodeGraphifyEvidenceResult;
 };
 
 export class CircuitDetailsPanel {
@@ -34,20 +35,24 @@ export class CircuitDetailsPanel {
 	private currentSnippet = '';
 	private chatTurns: NodeChatTurn[] = [];
 	private asking = false;
+	private graphifyContextEnabled = false;
 
 	static async createOrShow(
 		node: CircuitNode | undefined,
 		graph: CircuitGraph,
-		onAsk?: (request: NodeChatRequest) => Promise<string>
+		onAsk?: (request: NodeChatRequest) => Promise<string>,
+		options?: { graphifyContextEnabled?: boolean }
 	): Promise<CircuitDetailsPanel> {
 		const currentPanel = CircuitDetailsPanel.currentPanel;
 		if (currentPanel) {
 			// Treat Node Details like an inspector: update content without moving the user's chosen editor group.
 			currentPanel.currentGraph = graph;
 			currentPanel.onAsk = onAsk;
+			currentPanel.graphifyContextEnabled = Boolean(options?.graphifyContextEnabled);
 			if (node) {
 				await currentPanel.setNode(node);
 			}
+			currentPanel.render();
 			return currentPanel;
 		}
 
@@ -57,8 +62,17 @@ export class CircuitDetailsPanel {
 		});
 
 		CircuitDetailsPanel.currentPanel = new CircuitDetailsPanel(panel, graph, onAsk);
+		CircuitDetailsPanel.currentPanel.graphifyContextEnabled = Boolean(options?.graphifyContextEnabled);
 		await CircuitDetailsPanel.currentPanel.setNode(node);
 		return CircuitDetailsPanel.currentPanel;
+	}
+
+	static setGraphifyContextEnabled(enabled: boolean): void {
+		if (!CircuitDetailsPanel.currentPanel) {
+			return;
+		}
+		CircuitDetailsPanel.currentPanel.graphifyContextEnabled = enabled;
+		CircuitDetailsPanel.currentPanel.render();
 	}
 
 	static async syncGraph(graph: CircuitGraph): Promise<void> {
@@ -185,8 +199,8 @@ export class CircuitDetailsPanel {
 
 	private render(): void {
 		this.panel.webview.html = this.currentNode
-			? renderHtml(this.currentNode, this.currentSnippet, this.chatTurns, this.asking)
-			: renderEmptyHtml();
+			? renderHtml(this.currentNode, this.currentSnippet, this.chatTurns, this.asking, this.graphifyContextEnabled)
+			: renderEmptyHtml(this.graphifyContextEnabled);
 	}
 
 	private getConnectionContext(node: CircuitNode): { incoming: string[]; outgoing: string[] } {
@@ -455,12 +469,20 @@ function scoreSymbolMatch(
 	return score;
 }
 
-function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[], asking: boolean): string {
+function renderHtml(
+	node: CircuitNode,
+	snippet: string,
+	chatTurns: NodeChatTurn[],
+	asking: boolean,
+	graphifyContextEnabled: boolean
+): string {
 	const nonce = getNonce();
 	const esc = (s: string) =>
 		s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 	const title = `${node.type}: ${node.label}`;
+	const graphifyStatusText = graphifyContextEnabled ? 'Graphify Context: On' : 'Graphify Context: Off';
+	const graphifyStatusClass = graphifyContextEnabled ? 'on' : 'off';
 	const meta = [
 		`type: ${node.type}`,
 		node.layer ? `layer: ${node.layer}` : '',
@@ -494,7 +516,29 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
   <style>
     :root { --bg:#0b1020; --panel:#0f172a; --text:#e2e8f0; --muted:#9fb0cc; --border:#21304d; --code:#0b1225; --accent:#22c55e; }
     body { margin:0; padding:16px; background: radial-gradient(circle at top right, #1e293b, var(--bg) 55%); color:var(--text); font-family: Segoe UI, Tahoma, sans-serif; }
+    .header-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom: 6px; }
     h1 { font-size:16px; margin:0 0 6px; }
+    .graphify-pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid rgba(84, 117, 171, 0.75);
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+    .graphify-pill.on {
+      background: rgba(22, 163, 74, 0.24);
+      border-color: rgba(34, 197, 94, 0.88);
+      color: #dcfce7;
+    }
+    .graphify-pill.off {
+      background: rgba(30, 41, 59, 0.4);
+      border-color: rgba(84, 117, 171, 0.72);
+      color: #cbd5e1;
+    }
     .meta { color: var(--muted); font-size:12px; margin-bottom: 12px; }
     pre { background: var(--code); border:1px solid var(--border); border-radius:10px; padding:12px; overflow:auto; max-height: 260px; }
     code { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
@@ -582,7 +626,10 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
   </style>
 </head>
 <body>
-  <h1>${esc(title)}</h1>
+  <div class="header-row">
+    <h1>${esc(title)}</h1>
+    <div class="graphify-pill ${graphifyStatusClass}">${esc(graphifyStatusText)}</div>
+  </div>
   <div class="meta">${esc(meta)}</div>
   <div class="copy-wrap">
     <button class="copy-btn" id="copySnippetBtn" type="button" title="Copy snippet" aria-label="Copy snippet">⧉</button>
@@ -707,8 +754,10 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
 </html>`;
 }
 
-function renderEmptyHtml(): string {
+function renderEmptyHtml(graphifyContextEnabled: boolean): string {
 	const nonce = getNonce();
+	const graphifyStatusText = graphifyContextEnabled ? 'Graphify Context: On' : 'Graphify Context: Off';
+	const graphifyStatusClass = graphifyContextEnabled ? 'on' : 'off';
 	return `<!doctype html>
 <html>
 <head>
@@ -738,11 +787,42 @@ function renderEmptyHtml(): string {
       font-weight: 700;
       margin-bottom: 6px;
     }
+    .header-row {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom: 6px;
+    }
+    .graphify-pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid rgba(84, 117, 171, 0.75);
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+    .graphify-pill.on {
+      background: rgba(22, 163, 74, 0.24);
+      border-color: rgba(34, 197, 94, 0.88);
+      color: #dcfce7;
+    }
+    .graphify-pill.off {
+      background: rgba(30, 41, 59, 0.4);
+      border-color: rgba(84, 117, 171, 0.72);
+      color: #cbd5e1;
+    }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="title">Node Details</div>
+    <div class="header-row">
+      <div class="title">Node Details</div>
+      <div class="graphify-pill ${graphifyStatusClass}">${graphifyStatusText}</div>
+    </div>
     <div>Select a valid node in Circuit Mode to view its code snippet and chat context.</div>
   </div>
 </body>

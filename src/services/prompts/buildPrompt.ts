@@ -4,6 +4,8 @@ type BuildPromptOptions = {
 	graphContext?: string;
 };
 
+type NodeGraphifyEvidenceResult = import('../../shared/types/circuitTypes').NodeGraphifyEvidenceResult;
+
 export function buildPrompt(
 	languageId: string,
 	code: string,
@@ -274,6 +276,7 @@ type NodePromptRequest = {
 		incoming: string[];
 		outgoing: string[];
 	};
+	graphifyEvidence?: NodeGraphifyEvidenceResult;
 };
 
 export function buildNodeDetailsPrompt(request: NodePromptRequest): string {
@@ -324,6 +327,9 @@ ${request.connectionContext.outgoing.length ? request.connectionContext.outgoing
 Recent Chat:
 ${historyText || '(no previous history)'}
 
+Graphify Node Evidence:
+${formatNodeGraphifyEvidence(request.graphifyEvidence)}
+
 User Question:
 ${request.question}
 `;
@@ -358,9 +364,36 @@ ${request.connectionContext.outgoing.length ? request.connectionContext.outgoing
 Recent Chat:
 ${historyText || '(no previous history)'}
 
+Graphify Node Evidence:
+${formatNodeGraphifyEvidence(request.graphifyEvidence)}
+
 User Question:
 ${request.question}
 `;
+}
+
+function formatNodeGraphifyEvidence(evidence?: NodeGraphifyEvidenceResult): string {
+	if (!evidence) {
+		return '(not requested)';
+	}
+	if (evidence.status === 'fallback') {
+		return `Graphify node evidence unavailable; using structural fallback.\nReason: ${evidence.fallbackReason || 'No query/path evidence available.'}`;
+	}
+	const incoming = evidence.incoming.slice(0, 5).map((item) => `  - ${item.node}`).join('\n') || '  - none';
+	const outgoing = evidence.outgoing.slice(0, 5).map((item) => `  - ${item.node}`).join('\n') || '  - none';
+	const paths = evidence.paths.slice(0, 3).map((item) => `  - ${item.from} -> ${item.to}: ${item.summary}`).join('\n') || '  - none';
+	const files = evidence.topLinkedFiles.slice(0, 3).map((item) => `  - ${item.path} (score=${item.score})`).join('\n') || '  - none';
+	return [
+		evidence.summary || 'Node-scoped evidence loaded.',
+		'Incoming:',
+		incoming,
+		'Outgoing:',
+		outgoing,
+		'Paths:',
+		paths,
+		'Top Linked Files:',
+		files
+	].join('\n');
 }
 
 

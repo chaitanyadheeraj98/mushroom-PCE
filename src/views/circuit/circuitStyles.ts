@@ -111,6 +111,29 @@ export const circuitStyles = `
       font-size: 11px;
       line-height: 1.35;
     }
+    .graphify-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+      border-radius: 999px;
+      border: 1px solid rgba(84, 117, 171, 0.75);
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      max-width: fit-content;
+    }
+    .graphify-pill.on {
+      background: rgba(22, 163, 74, 0.24);
+      border-color: rgba(34, 197, 94, 0.88);
+      color: #dcfce7;
+    }
+    .graphify-pill.off {
+      background: rgba(30, 41, 59, 0.4);
+      border-color: rgba(84, 117, 171, 0.72);
+      color: #cbd5e1;
+    }
     .mode-row { display: flex; gap: 8px; margin-top: 6px; pointer-events: auto; }
     .hud-sections {
       margin-top: 7px;
