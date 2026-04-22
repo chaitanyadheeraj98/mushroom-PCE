@@ -25,6 +25,7 @@ import {
 	generateBlueprintPlanningArtifacts
 } from '../services/blueprint/generateBlueprintCode';
 import { scanSrcWorkspaceSnapshot } from '../services/blueprint/scanWorkspaceBlueprint';
+import { buildBlueprintGraphifyContext } from '../services/graphify/blueprintGraphifyContext';
 
 export function activateApp(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
@@ -680,11 +681,19 @@ export function activateApp(context: vscode.ExtensionContext) {
 							throw new Error('No AI model is currently available for Blueprint planner chat.');
 						}
 						const workspace = await scanSrcWorkspaceSnapshot();
+						const graphifyContextText = graphifyContextEnabled
+							? await loadBlueprintGraphifyContextFromWorkspace(
+								request.userMessage,
+								request.history as BlueprintConversationTurn[],
+								signal
+							)
+							: undefined;
 						const reply = await continueBlueprintPlanningTurn(
 							model,
 							request.userMessage,
 							request.history as BlueprintConversationTurn[],
 							workspace,
+							graphifyContextText,
 							signal
 						);
 						return reply;
@@ -706,10 +715,18 @@ export function activateApp(context: vscode.ExtensionContext) {
 							throw new Error('No AI model is currently available for Blueprint generation.');
 						}
 						const workspace = await scanSrcWorkspaceSnapshot();
+						const graphifyContextText = graphifyContextEnabled
+							? await loadBlueprintGraphifyContextFromWorkspace(
+								history.map((turn) => turn.text).join('\n'),
+								history as BlueprintConversationTurn[],
+								signal
+							)
+							: undefined;
 						const artifacts = await generateBlueprintPlanningArtifacts(
 							model,
 							history as BlueprintConversationTurn[],
 							workspace,
+							graphifyContextText,
 							signal
 						);
 						vscode.window.showInformationMessage('Blueprint prompt artifacts generated.');
@@ -768,8 +785,46 @@ export function activateApp(context: vscode.ExtensionContext) {
 					path: `docs/feature-plans/${fileName}`,
 					message: `Saved blueprint spec to docs/feature-plans/${fileName}`
 				};
+			},
+			{
+				initialGraphifyContextEnabled: graphifyContextEnabled
 			}
 		);
+	};
+
+	const loadBlueprintGraphifyContextFromWorkspace = async (
+		featureText: string,
+		history: BlueprintConversationTurn[],
+		signal?: AbortSignal
+	): Promise<string | undefined> => {
+		const currentDocument = getCurrentDocument();
+		const workspaceFolder = currentDocument
+			? vscode.workspace.getWorkspaceFolder(currentDocument.uri)
+			: vscode.workspace.workspaceFolders?.[0];
+		if (!workspaceFolder) {
+			output.appendLine('blueprint graphify context unavailable: no workspace folder');
+			return undefined;
+		}
+		try {
+			const contextText = await buildBlueprintGraphifyContext({
+				workspaceFsPath: workspaceFolder.uri.fsPath,
+				featureText,
+				history,
+				output,
+				signal
+			});
+			if (!contextText?.trim()) {
+				output.appendLine('blueprint graphify context unavailable: using workspace snapshot fallback');
+				return undefined;
+			}
+			output.appendLine('blueprint graphify context loaded');
+			return contextText;
+		} catch (error) {
+			output.appendLine(
+				`blueprint graphify context failed: ${String((error as { message?: string } | undefined)?.message || error)}`
+			);
+			return undefined;
+		}
 	};
 
 	const commandDisposables = registerPceCommands({

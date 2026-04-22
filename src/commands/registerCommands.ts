@@ -4,6 +4,7 @@ import { CircuitDetailsPanel, NodeChatRequest } from '../controllers/circuit/Cir
 import { buildCodeFlowGraph } from '../services/circuit/buildCodeFlowGraph';
 import { buildCircuitGraphHybrid } from '../services/circuit/buildGraphHybrid';
 import { buildProjectArchitectureGraph } from '../services/circuit/buildProjectArchitectureGraph';
+import { BlueprintPanel } from '../controllers/blueprint/BlueprintPanelController';
 import { CircuitPanel } from '../controllers/circuit/CircuitPanelController';
 import { buildGlobalSkeletonGraph } from '../services/circuit/buildSkeletonGraph';
 import { enrichCircuitGraphWithGraphifyContext } from '../services/circuit/graphifyCircuitContext';
@@ -183,6 +184,7 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 			}
 			CircuitPanel.setGraphifyContextEnabled(next);
 			CircuitDetailsPanel.setGraphifyContextEnabled(next);
+			BlueprintPanel.setGraphifyContextEnabled(next);
 			vscode.window.showInformationMessage(
 				`Mushroom PCE Graphify context ${next ? 'enabled' : 'disabled'}.`
 			);

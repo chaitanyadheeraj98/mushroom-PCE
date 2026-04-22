@@ -104,9 +104,10 @@ export async function continueBlueprintPlanningTurn(
 	userMessage: string,
 	history: BlueprintConversationTurn[],
 	workspace: BlueprintWorkspaceSnapshot | undefined,
+	graphifyContextText?: string,
 	signal?: AbortSignal
 ): Promise<BlueprintPlannerAssistantTurn> {
-	const prompt = buildPlanningTurnPrompt(userMessage, history, workspace);
+	const prompt = buildPlanningTurnPrompt(userMessage, history, workspace, graphifyContextText);
 	const response = await requestModelText(model, prompt, { signal });
 	const parsed = parseEnvelope<PlannerTurnEnvelope>(response || '');
 	const unresolvedQuestions = normalizeStringList(parsed?.unresolvedQuestions, 8);
@@ -121,9 +122,10 @@ export async function generateBlueprintPlanningArtifacts(
 	model: vscode.LanguageModelChat,
 	history: BlueprintConversationTurn[],
 	workspace: BlueprintWorkspaceSnapshot | undefined,
+	graphifyContextText?: string,
 	signal?: AbortSignal
 ): Promise<BlueprintPlanningArtifacts> {
-	const prompt = buildArtifactsPrompt(history, workspace);
+	const prompt = buildArtifactsPrompt(history, workspace, graphifyContextText);
 	const response = await requestModelText(model, prompt, { signal });
 	const parsed = parseEnvelope<PlannerSpecEnvelope>(response || '');
 	const spec = normalizeSpec(parsed);
@@ -139,8 +141,24 @@ export async function generateBlueprintPlanningArtifacts(
 function buildPlanningTurnPrompt(
 	userMessage: string,
 	history: BlueprintConversationTurn[],
-	workspace: BlueprintWorkspaceSnapshot | undefined
+	workspace: BlueprintWorkspaceSnapshot | undefined,
+	graphifyContextText?: string
 ): string {
+	const graphifySection = graphifyContextText?.trim()
+		? [
+			'Graphify Sources (optional, use when helpful):',
+			'- Source A (`GRAPH_REPORT.md`): high-level architecture overview and hub abstractions.',
+			'- Source B (`graph.json` snapshot): concrete file/folder/function distribution.',
+			'- Source C (`graphify query/path`): precise dependency/path evidence.',
+			'- Source selection rule: choose minimal sources for answer quality.',
+			'  - For overview/orientation: prioritize Source A + B.',
+			'  - For implementation planning: prefer Source B + C, and use Source A for architecture sanity-check.',
+			'',
+			'Graphify Context:',
+			graphifyContextText.trim()
+		].join('\n')
+		: 'Graphify Sources: unavailable or disabled; rely on workspace snapshot + conversation.';
+
 	return [
 		'You are Mushroom Blueprint Planner, a detail-oriented software planning assistant inside VS Code.',
 		'The user is planning a feature in plain English before implementation.',
@@ -151,6 +169,7 @@ function buildPlanningTurnPrompt(
 		'- Track unresolved specification questions.',
 		'- Keep language practical and concrete.',
 		'- Focus follow-up questions on: launch entrypoint, data model shape, interaction UX, persistence, validation rules, and tests.',
+		'- When Graphify context is provided, choose the right source(s) instead of using everything blindly.',
 		'- Return valid JSON only.',
 		'',
 		'OUTPUT JSON SCHEMA:',
@@ -167,6 +186,8 @@ function buildPlanningTurnPrompt(
 		'',
 		renderWorkspaceContext(workspace),
 		'',
+		graphifySection,
+		'',
 		'Recent Conversation:',
 		...history.slice(-18).map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`),
 		'',
@@ -174,7 +195,27 @@ function buildPlanningTurnPrompt(
 	].join('\n');
 }
 
-function buildArtifactsPrompt(history: BlueprintConversationTurn[], workspace: BlueprintWorkspaceSnapshot | undefined): string {
+function buildArtifactsPrompt(
+	history: BlueprintConversationTurn[],
+	workspace: BlueprintWorkspaceSnapshot | undefined,
+	graphifyContextText?: string
+): string {
+	const graphifySection = graphifyContextText?.trim()
+		? [
+			'Graphify Sources (optional, use when needed for precision):',
+			'- Source A (`GRAPH_REPORT.md`): architecture overview/hubs/communities.',
+			'- Source B (`graph.json` snapshot): concrete structural inventory (paths/modules/functions).',
+			'- Source C (`graphify query/path`): targeted relationships and path evidence.',
+			'- Source selection policy:',
+			'  - Overview-only requests: Source A + B is usually enough.',
+			'  - Precise implementation/file placement requests: combine Source B + C; use Source A for architecture consistency.',
+			'- Always prioritize concrete file/function evidence when deciding reuse, create, or edit actions.',
+			'',
+			'Graphify Context:',
+			graphifyContextText.trim()
+		].join('\n')
+		: 'Graphify Sources: unavailable or disabled; rely on workspace snapshot + conversation.';
+
 	return [
 		'You are finalizing a feature implementation planning package.',
 		'Return strictly valid JSON only.',
@@ -184,6 +225,7 @@ function buildArtifactsPrompt(history: BlueprintConversationTurn[], workspace: B
 		'- Prefer existing functions first, then list new functions/files only when needed.',
 		'- Include file edits and integration duties.',
 		'- The final plan must be explicit enough for another coding AI to implement without guessing.',
+		'- When Graphify context is provided, choose the right source(s) for precision and cite concrete paths/functions in your reasoning.',
 		'',
 		'OUTPUT JSON SCHEMA:',
 		'{',
@@ -214,6 +256,8 @@ function buildArtifactsPrompt(history: BlueprintConversationTurn[], workspace: B
 		'- Include at least 3 implementationChanges and at least 4 testPlan items when feasible.',
 		'',
 		renderWorkspaceContext(workspace),
+		'',
+		graphifySection,
 		'',
 		'Conversation:',
 		...history.slice(-30).map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)

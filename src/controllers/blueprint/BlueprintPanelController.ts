@@ -29,13 +29,22 @@ export class BlueprintPanel {
 	private readonly onGenerateArtifacts: (history: BlueprintChatTurn[]) => Promise<BlueprintPlanningArtifacts>;
 	private readonly onSaveArtifacts: (artifacts: BlueprintPlanningArtifacts | undefined) => Promise<SaveResult>;
 	private latestArtifacts: BlueprintPlanningArtifacts | undefined;
+	private graphifyContextEnabled = false;
 
 	static createOrShow(
 		onUserTurn: (request: HandleUserTurnRequest) => Promise<BlueprintPlannerAssistantTurn>,
 		onGenerateArtifacts: (history: BlueprintChatTurn[]) => Promise<BlueprintPlanningArtifacts>,
-		onSaveArtifacts: (artifacts: BlueprintPlanningArtifacts | undefined) => Promise<SaveResult>
+		onSaveArtifacts: (artifacts: BlueprintPlanningArtifacts | undefined) => Promise<SaveResult>,
+		options?: { initialGraphifyContextEnabled?: boolean }
 	): BlueprintPanel {
 		if (BlueprintPanel.currentPanel) {
+			if (typeof options?.initialGraphifyContextEnabled === 'boolean') {
+				BlueprintPanel.currentPanel.graphifyContextEnabled = options.initialGraphifyContextEnabled;
+				BlueprintPanel.currentPanel.panel.webview.postMessage({
+					type: 'graphifyContextState',
+					enabled: options.initialGraphifyContextEnabled
+				});
+			}
 			BlueprintPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
 			return BlueprintPanel.currentPanel;
 		}
@@ -50,20 +59,36 @@ export class BlueprintPanel {
 			}
 		);
 
-		BlueprintPanel.currentPanel = new BlueprintPanel(panel, onUserTurn, onGenerateArtifacts, onSaveArtifacts);
+		BlueprintPanel.currentPanel = new BlueprintPanel(
+			panel,
+			onUserTurn,
+			onGenerateArtifacts,
+			onSaveArtifacts,
+			options
+		);
 		return BlueprintPanel.currentPanel;
+	}
+
+	static setGraphifyContextEnabled(enabled: boolean): void {
+		if (!BlueprintPanel.currentPanel) {
+			return;
+		}
+		BlueprintPanel.currentPanel.graphifyContextEnabled = enabled;
+		BlueprintPanel.currentPanel.panel.webview.postMessage({ type: 'graphifyContextState', enabled });
 	}
 
 	private constructor(
 		panel: vscode.WebviewPanel,
 		onUserTurn: (request: HandleUserTurnRequest) => Promise<BlueprintPlannerAssistantTurn>,
 		onGenerateArtifacts: (history: BlueprintChatTurn[]) => Promise<BlueprintPlanningArtifacts>,
-		onSaveArtifacts: (artifacts: BlueprintPlanningArtifacts | undefined) => Promise<SaveResult>
+		onSaveArtifacts: (artifacts: BlueprintPlanningArtifacts | undefined) => Promise<SaveResult>,
+		options?: { initialGraphifyContextEnabled?: boolean }
 	) {
 		this.panel = panel;
 		this.onUserTurn = onUserTurn;
 		this.onGenerateArtifacts = onGenerateArtifacts;
 		this.onSaveArtifacts = onSaveArtifacts;
+		this.graphifyContextEnabled = Boolean(options?.initialGraphifyContextEnabled);
 
 		this.panel.webview.html = this.getHtml();
 		this.panel.webview.onDidReceiveMessage(
@@ -81,6 +106,10 @@ export class BlueprintPanel {
 				}
 				if (msg?.type === 'blueprintSavePromptArtifacts') {
 					await this.handleSaveArtifacts();
+					return;
+				}
+				if (msg?.type === 'blueprintToggleGraphifyContext') {
+					await vscode.commands.executeCommand('mushroom-pce.toggleGraphifyContext');
 				}
 			},
 			null,
@@ -151,6 +180,7 @@ export class BlueprintPanel {
 	private getHtml(): string {
 		const nonce = getNonce();
 		const csp = this.panel.webview.cspSource;
+		const initialGraphifyContextEnabledJson = JSON.stringify(this.graphifyContextEnabled);
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -213,6 +243,32 @@ export class BlueprintPanel {
     }
     .title { font-size: 14px; font-weight: 700; letter-spacing: 0; }
     .status { font-size: 12px; color: var(--muted); min-height: 16px; }
+    .graphify-pill {
+      border: 1px solid #36507f;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0;
+      color: #cfe3ff;
+      background: linear-gradient(180deg, rgba(19, 35, 70, 0.95), rgba(14, 27, 58, 0.95));
+      cursor: pointer;
+      user-select: none;
+      transition: border-color 120ms ease, background-color 120ms ease;
+    }
+    .graphify-pill:hover {
+      border-color: color-mix(in oklab, #5fb3ff 44%, #36507f);
+    }
+    .graphify-pill.on {
+      border-color: color-mix(in oklab, #22c55e 58%, #36507f);
+      background: color-mix(in oklab, #22c55e 18%, rgba(14, 27, 58, 0.95));
+      color: #d9ffe8;
+    }
+    .graphify-pill.off {
+      border-color: color-mix(in oklab, #5f6d85 58%, #36507f);
+      background: color-mix(in oklab, #5f6d85 18%, rgba(14, 27, 58, 0.95));
+      color: #d1d9e6;
+    }
     .icon-btn {
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -387,6 +443,7 @@ export class BlueprintPanel {
       <div class="header">
         <div class="title">Blueprint Planner Chat</div>
         <div class="header-tools">
+          <button id="graphifyContextIndicator" class="graphify-pill off" title="Toggle Graphify Context" aria-label="Toggle Graphify Context">Graphify Context: Off</button>
           <button id="copyChatBtn" class="icon-btn" title="Copy chat transcript" aria-label="Copy chat transcript">⧉</button>
           <div id="status" class="status">Start by describing the feature. I will ask implementation questions.</div>
         </div>
@@ -441,6 +498,7 @@ export class BlueprintPanel {
     const copyChatBtn = document.getElementById('copyChatBtn');
     const copySpecBtn = document.getElementById('copySpecBtn');
     const copyPromptBtn = document.getElementById('copyPromptBtn');
+    const graphifyContextIndicator = document.getElementById('graphifyContextIndicator');
     const layoutEl = document.querySelector('.layout');
     const rightWrapEl = document.getElementById('rightWrap');
     const colResizer = document.getElementById('colResizer');
@@ -449,7 +507,8 @@ export class BlueprintPanel {
     const state = {
       busy: false,
       history: [],
-      artifacts: null
+      artifacts: null,
+      graphifyContextEnabled: ${initialGraphifyContextEnabledJson}
     };
 
     function setStatus(text) {
@@ -476,6 +535,15 @@ export class BlueprintPanel {
 
     function clamp(value, min, max) {
       return Math.max(min, Math.min(max, value));
+    }
+
+    function updateGraphifyContextIndicator() {
+      if (!graphifyContextIndicator) {
+        return;
+      }
+      graphifyContextIndicator.textContent = 'Graphify Context: ' + (state.graphifyContextEnabled ? 'On' : 'Off');
+      graphifyContextIndicator.classList.toggle('on', !!state.graphifyContextEnabled);
+      graphifyContextIndicator.classList.toggle('off', !state.graphifyContextEnabled);
     }
 
     async function copyText(text, label) {
@@ -631,6 +699,9 @@ export class BlueprintPanel {
     copyPromptBtn?.addEventListener('click', () => {
       void copyText(promptView.textContent || '', 'Prompt Output');
     });
+    graphifyContextIndicator?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'blueprintToggleGraphifyContext' });
+    });
     userInput.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
         ev.preventDefault();
@@ -641,6 +712,11 @@ export class BlueprintPanel {
     window.addEventListener('message', (event) => {
       const msg = event.data;
       if (!msg || typeof msg !== 'object') {
+        return;
+      }
+      if (msg.type === 'graphifyContextState') {
+        state.graphifyContextEnabled = !!msg.enabled;
+        updateGraphifyContextIndicator();
         return;
       }
 
@@ -685,6 +761,7 @@ export class BlueprintPanel {
     });
 
     initResizers();
+    updateGraphifyContextIndicator();
   </script>
 </body>
 </html>`;
