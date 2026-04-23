@@ -128,7 +128,11 @@ export async function generateBlueprintPlanningArtifacts(
 	const prompt = buildArtifactsPrompt(history, workspace, graphifyContextText);
 	const response = await requestModelText(model, prompt, { signal });
 	const parsed = parseEnvelope<PlannerSpecEnvelope>(response || '');
-	const spec = normalizeSpec(parsed);
+	const draftSpec = normalizeSpec(parsed);
+	const targetedContext = await buildTargetedFunctionContext(draftSpec, signal);
+	const spec = targetedContext
+		? await refineSpecWithCodeContext(model, prompt, draftSpec, targetedContext, signal)
+		: draftSpec;
 	return {
 		featureName: spec.featureName,
 		spec,
@@ -262,6 +266,256 @@ function buildArtifactsPrompt(
 		'Conversation:',
 		...history.slice(-30).map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)
 	].join('\n');
+}
+
+type BlueprintFunctionContext = {
+	path: string;
+	name: string;
+	snippet: string;
+	matchType: 'function' | 'variable' | 'method' | 'fallback';
+};
+
+async function refineSpecWithCodeContext(
+	model: vscode.LanguageModelChat,
+	basePrompt: string,
+	draftSpec: BlueprintPlanningSpec,
+	targetedContext: string,
+	signal?: AbortSignal
+): Promise<BlueprintPlanningSpec> {
+	const prompt = [
+		basePrompt,
+		'',
+		'Second-pass refinement stage:',
+		'- You now have targeted source snippets for reuse/edit candidates.',
+		'- Validate whether reuseFunctions actually match intended duties based on code evidence.',
+		'- If a reuse candidate does not match behavior, move it to editFunctions or createFunctions.',
+		'- Do not keep uncertain items in reuseFunctions.',
+		'- Keep all paths under src/.',
+		'- Return strictly valid JSON with the same schema.',
+		'',
+		'Draft Spec JSON:',
+		'```json',
+		JSON.stringify(draftSpec, null, 2),
+		'```',
+		'',
+		'Targeted Source Evidence:',
+		targetedContext
+	].join('\n');
+
+	const response = await requestModelText(model, prompt, { signal });
+	const parsed = parseEnvelope<PlannerSpecEnvelope>(response || '');
+	return normalizeSpec(parsed);
+}
+
+async function buildTargetedFunctionContext(
+	spec: BlueprintPlanningSpec,
+	signal?: AbortSignal
+): Promise<string | undefined> {
+	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+	if (!workspaceFolder) {
+		return undefined;
+	}
+
+	const candidates = dedupeFunctionTargets([...spec.reuseFunctions, ...spec.editFunctions]).slice(0, 10);
+	if (!candidates.length) {
+		return undefined;
+	}
+
+	const contexts: BlueprintFunctionContext[] = [];
+	for (const candidate of candidates) {
+		if (signal?.aborted) {
+			break;
+		}
+
+		const normalizedPath = normalizePath(candidate.path);
+		if (!normalizedPath || !normalizedPath.startsWith('src/')) {
+			continue;
+		}
+
+		const uri = vscode.Uri.joinPath(workspaceFolder.uri, ...normalizedPath.split('/'));
+		let bytes: Uint8Array;
+		try {
+			bytes = await vscode.workspace.fs.readFile(uri);
+		} catch {
+			continue;
+		}
+
+		const text = decodeUtf8(bytes);
+		if (!text) {
+			continue;
+		}
+
+		const snippetMatch = findFunctionSnippet(text, candidate.name);
+		if (!snippetMatch) {
+			continue;
+		}
+
+		contexts.push({
+			path: normalizedPath,
+			name: candidate.name,
+			snippet: snippetMatch.snippet,
+			matchType: snippetMatch.matchType
+		});
+		if (contexts.length >= 10) {
+			break;
+		}
+	}
+
+	if (!contexts.length) {
+		return undefined;
+	}
+
+	return contexts
+		.map((item, index) => [
+			`### Candidate ${index + 1}`,
+			`Path: ${item.path}`,
+			`Symbol: ${item.name}`,
+			`Match: ${item.matchType}`,
+			'```ts',
+			item.snippet,
+			'```'
+		].join('\n'))
+		.join('\n\n');
+}
+
+function dedupeFunctionTargets(items: BlueprintSpecFunctionRef[]): BlueprintSpecFunctionRef[] {
+	const seen = new Set<string>();
+	const out: BlueprintSpecFunctionRef[] = [];
+	for (const item of items) {
+		const name = String(item.name || '').trim();
+		const pathValue = normalizePath(String(item.path || '').trim());
+		if (!name || !pathValue) {
+			continue;
+		}
+		const key = `${pathValue.toLowerCase()}::${name.toLowerCase()}`;
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		out.push({
+			...item,
+			name,
+			path: pathValue
+		});
+	}
+	return out;
+}
+
+function findFunctionSnippet(
+	text: string,
+	functionName: string
+): { snippet: string; matchType: BlueprintFunctionContext['matchType'] } | undefined {
+	const name = escapeRegExp(functionName.trim());
+	if (!name) {
+		return undefined;
+	}
+	const patterns: Array<{ regex: RegExp; matchType: BlueprintFunctionContext['matchType'] }> = [
+		{
+			regex: new RegExp(`\\b(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\s*\\(`),
+			matchType: 'function'
+		},
+		{
+			regex: new RegExp(`\\b(?:export\\s+)?(?:const|let|var)\\s+${name}\\s*=\\s*(?:async\\s*)?\\(`),
+			matchType: 'variable'
+		},
+		{
+			regex: new RegExp(`\\b${name}\\s*:\\s*(?:async\\s*)?\\(`),
+			matchType: 'method'
+		},
+		{
+			regex: new RegExp(`\\b${name}\\s*\\(`),
+			matchType: 'fallback'
+		}
+	];
+
+	for (const pattern of patterns) {
+		const match = pattern.regex.exec(text);
+		if (!match || typeof match.index !== 'number') {
+			continue;
+		}
+		const snippet = extractSnippetWindow(text, match.index);
+		if (snippet) {
+			return {
+				snippet,
+				matchType: pattern.matchType
+			};
+		}
+	}
+	return undefined;
+}
+
+function extractSnippetWindow(text: string, anchorIndex: number): string | undefined {
+	if (anchorIndex < 0 || anchorIndex >= text.length) {
+		return undefined;
+	}
+	const lineStarts = buildLineStarts(text);
+	const totalLines = lineStarts.length;
+	if (!totalLines) {
+		return undefined;
+	}
+	const anchorLine = findLineNumberAtIndex(lineStarts, anchorIndex);
+	const startLine = Math.max(1, anchorLine - 4);
+	const endLine = Math.min(totalLines, anchorLine + 36);
+	return getLineRange(text, lineStarts, startLine, endLine, 1400);
+}
+
+function buildLineStarts(text: string): number[] {
+	const starts = [0];
+	for (let i = 0; i < text.length; i++) {
+		if (text.charCodeAt(i) === 10) {
+			starts.push(i + 1);
+		}
+	}
+	return starts;
+}
+
+function findLineNumberAtIndex(lineStarts: number[], index: number): number {
+	let low = 0;
+	let high = lineStarts.length - 1;
+	while (low <= high) {
+		const mid = Math.floor((low + high) / 2);
+		const start = lineStarts[mid] ?? 0;
+		const nextStart = lineStarts[mid + 1] ?? Number.MAX_SAFE_INTEGER;
+		if (index >= start && index < nextStart) {
+			return mid + 1;
+		}
+		if (index < start) {
+			high = mid - 1;
+		} else {
+			low = mid + 1;
+		}
+	}
+	return 1;
+}
+
+function getLineRange(
+	text: string,
+	lineStarts: number[],
+	startLine: number,
+	endLine: number,
+	maxChars: number
+): string {
+	const clampedStart = Math.max(1, startLine);
+	const clampedEnd = Math.max(clampedStart, Math.min(endLine, lineStarts.length));
+	const startIndex = lineStarts[clampedStart - 1] ?? 0;
+	const endIndex = clampedEnd < lineStarts.length ? (lineStarts[clampedEnd] ?? text.length) : text.length;
+	const raw = text.slice(startIndex, endIndex);
+	if (raw.length <= maxChars) {
+		return raw.trimEnd();
+	}
+	return `${raw.slice(0, maxChars).trimEnd()}\n// ... [snippet truncated]`;
+}
+
+function decodeUtf8(bytes: Uint8Array): string {
+	try {
+		return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+	} catch {
+		return '';
+	}
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function renderWorkspaceContext(workspace: BlueprintWorkspaceSnapshot | undefined): string {

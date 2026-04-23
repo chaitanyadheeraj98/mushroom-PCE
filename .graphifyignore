@@ -1,0 +1,12 @@
+# Dependencies and build artifacts
+node_modules/
+dist/
+out/
+
+# Git and editor metadata
+.git/
+.vscode-test/
+
+# Graphify generated files
+graphify-out/cache/
+
