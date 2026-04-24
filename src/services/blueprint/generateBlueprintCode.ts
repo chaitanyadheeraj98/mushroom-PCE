@@ -52,6 +52,13 @@ export type BlueprintPlanningArtifacts = {
 	prompt: string;
 	modelLabel?: string;
 	generatedAt: number;
+	featureTracking?: {
+		featureId: string;
+		registryPath: string;
+		status: 'draft' | 'saved';
+		matchedExistingFeatureId?: string;
+		overlapScore?: number;
+	};
 };
 
 type PlannerTurnEnvelope = {

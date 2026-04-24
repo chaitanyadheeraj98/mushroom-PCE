@@ -676,14 +676,19 @@ export class BlueprintPanel {
 
     function applyArtifacts(artifacts) {
       state.artifacts = artifacts || null;
+      const featureTracking = artifacts && artifacts.featureTracking ? artifacts.featureTracking : null;
       specHead.textContent = artifacts
-        ? 'Feature: ' + (artifacts.featureName || 'Untitled') + '\\nGenerated: ' + new Date(artifacts.generatedAt).toLocaleString()
+        ? 'Feature: ' + (artifacts.featureName || 'Untitled') +
+          '\\nGenerated: ' + new Date(artifacts.generatedAt).toLocaleString() +
+          (featureTracking && featureTracking.featureId ? '\\nFeature ID: ' + featureTracking.featureId : '')
         : 'Waiting for generation.';
       specView.textContent = artifacts ? JSON.stringify(artifacts.spec || {}, null, 2) : '{}';
       promptView.textContent = artifacts ? String(artifacts.prompt || '') : '';
       saveBtn.disabled = state.busy || !state.artifacts;
       metaEl.textContent = artifacts
-        ? 'Model: ' + String(artifacts.modelLabel || 'unknown')
+        ? 'Model: ' + String(artifacts.modelLabel || 'unknown') +
+          (featureTracking && featureTracking.registryPath ? '\\nRegistry: ' + featureTracking.registryPath : '') +
+          (featureTracking && featureTracking.status ? '\\nTracking status: ' + featureTracking.status : '')
         : 'No artifacts generated yet.';
     }
 

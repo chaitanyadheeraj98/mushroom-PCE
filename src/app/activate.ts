@@ -26,6 +26,7 @@ import {
 } from '../services/blueprint/generateBlueprintCode';
 import { scanSrcWorkspaceSnapshot } from '../services/blueprint/scanWorkspaceBlueprint';
 import { buildBlueprintGraphifyContext } from '../services/graphify/blueprintGraphifyContext';
+import { upsertBlueprintFeatureFromArtifacts } from '../services/blueprint/featureRegistry';
 
 export function activateApp(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
@@ -729,8 +730,25 @@ export function activateApp(context: vscode.ExtensionContext) {
 							graphifyContextText,
 							signal
 						);
+						const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+						if (!workspaceFolder) {
+							vscode.window.showInformationMessage('Blueprint prompt artifacts generated.');
+							return artifacts;
+						}
+						const registryUpdate = await upsertBlueprintFeatureFromArtifacts(workspaceFolder, artifacts, {
+							status: 'draft'
+						});
 						vscode.window.showInformationMessage('Blueprint prompt artifacts generated.');
-						return artifacts;
+						return {
+							...artifacts,
+							featureTracking: {
+								featureId: registryUpdate.record.featureId,
+								registryPath: registryUpdate.registryPath,
+								status: registryUpdate.record.status,
+								matchedExistingFeatureId: registryUpdate.matchedExistingFeatureId,
+								overlapScore: registryUpdate.overlapScore
+							}
+						};
 					}
 				}),
 			async (artifacts) => {
@@ -779,11 +797,23 @@ export function activateApp(context: vscode.ExtensionContext) {
 				}
 				const content = renderBlueprintSpecMarkdown(artifacts);
 				await vscode.workspace.fs.writeFile(targetUri, new TextEncoder().encode(content));
+				const savedPath = `docs/feature-plans/${fileName}`;
+				const registryUpdate = await upsertBlueprintFeatureFromArtifacts(workspaceFolder, artifacts, {
+					status: 'saved',
+					savedSpecPath: savedPath
+				});
+				artifacts.featureTracking = {
+					featureId: registryUpdate.record.featureId,
+					registryPath: registryUpdate.registryPath,
+					status: registryUpdate.record.status,
+					matchedExistingFeatureId: registryUpdate.matchedExistingFeatureId,
+					overlapScore: registryUpdate.overlapScore
+				};
 				vscode.window.showInformationMessage(`Blueprint spec saved: docs/feature-plans/${fileName}`);
 				return {
 					saved: true,
-					path: `docs/feature-plans/${fileName}`,
-					message: `Saved blueprint spec to docs/feature-plans/${fileName}`
+					path: savedPath,
+					message: `Saved blueprint spec to ${savedPath}\nFeature ID: ${registryUpdate.record.featureId}\nRegistry: ${registryUpdate.registryPath}`
 				};
 			},
 			{
@@ -903,21 +933,29 @@ export function activateApp(context: vscode.ExtensionContext) {
 }
 
 function makeBlueprintSpecFileName(artifacts: BlueprintPlanningArtifacts): string {
+	const featureIdPart = String(artifacts.featureTracking?.featureId || '')
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, '')
+		.slice(0, 36);
 	const slug = String(artifacts.featureName || 'feature-plan')
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, '-')
 		.replace(/^-+|-+$/g, '')
 		.slice(0, 64) || 'feature-plan';
 	const stamp = new Date(artifacts.generatedAt || Date.now()).toISOString().replace(/[:.]/g, '-');
-	return `${slug}-${stamp}.md`;
+	return featureIdPart ? `${slug}-${featureIdPart}-${stamp}.md` : `${slug}-${stamp}.md`;
 }
 
 function renderBlueprintSpecMarkdown(artifacts: BlueprintPlanningArtifacts): string {
+	const tracking = artifacts.featureTracking;
 	return [
 		`# ${artifacts.featureName} Blueprint Spec`,
 		'',
 		`Generated: ${new Date(artifacts.generatedAt).toISOString()}`,
 		`Model: ${artifacts.modelLabel ?? 'unknown'}`,
+		tracking ? `Feature ID: ${tracking.featureId}` : '',
+		tracking ? `Registry: ${tracking.registryPath}` : '',
+		tracking ? `Tracking Status: ${tracking.status}` : '',
 		'',
 		'## JSON Spec',
 		'```json',
