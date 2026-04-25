@@ -37,7 +37,10 @@ type RegisterCommandsDeps = {
 		graph: CircuitGraph,
 		scope?: 'current-file' | 'full-architecture' | 'codeflow'
 	) => Promise<CircuitAiEnrichmentResult | undefined>;
-	requestCircuitRelationExplain: (graph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>;
+	requestCircuitRelationExplain: (
+		graph: CircuitGraph,
+		options: { fromNodeId?: string; toNodeId?: string; userPrompt?: string; extraContextText?: string }
+	) => Promise<string | undefined>;
 	openBlueprintPanel: () => Promise<void>;
 };
 
@@ -249,8 +252,8 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 			async (currentGraph, scope) => {
 				return deps.requestCircuitAiEnrichment(currentGraph, scope);
 			},
-			async (currentGraph, fromNodeId, toNodeId) => {
-				return deps.requestCircuitRelationExplain(currentGraph, fromNodeId, toNodeId);
+			async (currentGraph, options) => {
+				return deps.requestCircuitRelationExplain(currentGraph, options);
 			},
 			{
 				initialGraphifyContextEnabled: deps.getGraphifyContextEnabled()

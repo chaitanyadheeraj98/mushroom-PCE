@@ -5,6 +5,11 @@ import {
 	BlueprintPlannerAssistantTurn
 } from '../../services/blueprint/generateBlueprintCode';
 import { BlueprintFeatureRegistryOption } from '../../services/blueprint/featureRegistry';
+import {
+	buildChatTranscriptMarkdown,
+	exportChatMarkdownFile,
+	readChatMarkdownFile
+} from '../../services/chat/chatSessionMarkdown';
 
 type BlueprintChatTurn = {
 	role: 'user' | 'assistant';
@@ -14,16 +19,19 @@ type BlueprintChatTurn = {
 type HandleUserTurnRequest = {
 	userMessage: string;
 	history: BlueprintChatTurn[];
+	extraContextText?: string;
 };
 
 type HandleRepoChatRequest = {
 	userMessage: string;
 	history: BlueprintChatTurn[];
+	extraContextText?: string;
 };
 
 type HandleGenerateArtifactsRequest = {
 	history: BlueprintChatTurn[];
 	forcedFeatureId?: string;
+	extraContextText?: string;
 };
 
 type SaveResult = {
@@ -44,6 +52,10 @@ export class BlueprintPanel {
 	private latestArtifacts: BlueprintPlanningArtifacts | undefined;
 	private forcedFeatureId: string | undefined;
 	private graphifyContextEnabled = false;
+	private blueprintReadContextText = '';
+	private repoReadContextText = '';
+	private readonly blueprintExportCursorByFile = new Map<string, number>();
+	private readonly repoExportCursorByFile = new Map<string, number>();
 
 	static createOrShow(
 		onUserTurn: (request: HandleUserTurnRequest) => Promise<BlueprintPlannerAssistantTurn>,
@@ -118,21 +130,40 @@ export class BlueprintPanel {
 				if (msg?.type === 'blueprintUserTurn') {
 					await this.handleUserTurn({
 						userMessage: String(msg?.userMessage || ''),
-						history: normalizeHistory(msg?.history)
+						history: normalizeHistory(msg?.history),
+						extraContextText: typeof msg?.extraContextText === 'string' ? msg.extraContextText : undefined
 					});
 					return;
 				}
 				if (msg?.type === 'blueprintRepoChat') {
 					await this.handleRepoChat({
 						userMessage: String(msg?.userMessage || ''),
-						history: normalizeHistory(msg?.history)
+						history: normalizeHistory(msg?.history),
+						extraContextText: typeof msg?.extraContextText === 'string' ? msg.extraContextText : undefined
 					});
 					return;
 				}
 				if (msg?.type === 'blueprintGeneratePrompt') {
 					await this.handleGenerateArtifacts({
 						history: normalizeHistory(msg?.history),
-						forcedFeatureId: String(msg?.forcedFeatureId || '').trim() || this.forcedFeatureId
+						forcedFeatureId: String(msg?.forcedFeatureId || '').trim() || this.forcedFeatureId,
+						extraContextText: typeof msg?.extraContextText === 'string' ? msg.extraContextText : undefined
+					});
+					return;
+				}
+				if (msg?.type === 'blueprintExportChatTranscript') {
+					await this.handleExportChatTranscript({
+						fileName: String(msg?.fileName || ''),
+						mode: msg?.mode === 'blueprint' ? 'blueprint' : 'chat',
+						history: normalizeHistory(msg?.history),
+						exportMode: msg?.exportMode === 'edit' ? 'edit' : 'update'
+					});
+					return;
+				}
+				if (msg?.type === 'blueprintReadChatContext') {
+					await this.handleReadChatContext({
+						fileName: String(msg?.fileName || ''),
+						mode: msg?.mode === 'blueprint' ? 'blueprint' : 'chat'
 					});
 					return;
 				}
@@ -182,7 +213,10 @@ export class BlueprintPanel {
 
 	private async handleUserTurn(request: HandleUserTurnRequest): Promise<void> {
 		try {
-			const result = await this.onUserTurn(request);
+			const result = await this.onUserTurn({
+				...request,
+				extraContextText: request.extraContextText ?? this.blueprintReadContextText
+			});
 			this.panel.webview.postMessage({
 				type: 'blueprintAssistantTurn',
 				result
@@ -197,7 +231,10 @@ export class BlueprintPanel {
 
 	private async handleRepoChat(request: HandleRepoChatRequest): Promise<void> {
 		try {
-			const message = await this.onRepoChat(request);
+			const message = await this.onRepoChat({
+				...request,
+				extraContextText: request.extraContextText ?? this.repoReadContextText
+			});
 			this.panel.webview.postMessage({
 				type: 'blueprintRepoAssistantTurn',
 				result: {
@@ -214,7 +251,10 @@ export class BlueprintPanel {
 
 	private async handleGenerateArtifacts(request: HandleGenerateArtifactsRequest): Promise<void> {
 		try {
-			const artifacts = await this.onGenerateArtifacts(request);
+			const artifacts = await this.onGenerateArtifacts({
+				...request,
+				extraContextText: request.extraContextText ?? this.blueprintReadContextText
+			});
 			this.forcedFeatureId = String(request.forcedFeatureId || '').trim() || undefined;
 			this.latestArtifacts = artifacts;
 			this.panel.webview.postMessage({
@@ -224,6 +264,92 @@ export class BlueprintPanel {
 		} catch (error: any) {
 			this.panel.webview.postMessage({
 				type: 'blueprintPromptGenerated',
+				error: error?.message ?? String(error)
+			});
+		}
+	}
+
+	private async handleExportChatTranscript(request: {
+		fileName: string;
+		mode: 'blueprint' | 'chat';
+		history: BlueprintChatTurn[];
+		exportMode: 'edit' | 'update';
+	}): Promise<void> {
+		const title =
+			request.mode === 'blueprint'
+				? 'Blueprint Planner Session Chat'
+				: 'Blueprint Repo Q&A Chat';
+		try {
+			const fileKey = request.fileName.trim().toLowerCase();
+			const cursorMap = request.mode === 'blueprint'
+				? this.blueprintExportCursorByFile
+				: this.repoExportCursorByFile;
+			const previousCursorRaw = cursorMap.get(fileKey) ?? 0;
+			const previousCursor = previousCursorRaw > request.history.length ? 0 : previousCursorRaw;
+			const exportTurns =
+				request.exportMode === 'edit'
+					? request.history.slice(Math.max(0, previousCursor))
+					: request.history;
+			if (request.exportMode === 'edit' && !exportTurns.length) {
+				this.panel.webview.postMessage({
+					type: 'blueprintChatExported',
+					mode: request.mode,
+					path: request.fileName,
+					created: false,
+					exportMode: request.exportMode,
+					skipped: true,
+					message: 'No new chat turns since last /export ... -e for this file.'
+				});
+				return;
+			}
+			const markdown = buildChatTranscriptMarkdown(title, exportTurns);
+			const result = await exportChatMarkdownFile({
+				fileName: request.fileName,
+				markdown,
+				mode: request.exportMode
+			});
+			cursorMap.set(fileKey, request.history.length);
+			this.panel.webview.postMessage({
+				type: 'blueprintChatExported',
+				mode: request.mode,
+				path: result.relativePath,
+				created: result.created,
+				exportMode: request.exportMode,
+				exportedTurns: exportTurns.length
+			});
+		} catch (error: any) {
+			this.panel.webview.postMessage({
+				type: 'blueprintChatExported',
+				mode: request.mode,
+				exportMode: request.exportMode,
+				error: error?.message ?? String(error)
+			});
+		}
+	}
+
+	private async handleReadChatContext(request: {
+		fileName: string;
+		mode: 'blueprint' | 'chat';
+	}): Promise<void> {
+		try {
+			const result = await readChatMarkdownFile({
+				fileName: request.fileName
+			});
+			if (request.mode === 'blueprint') {
+				this.blueprintReadContextText = result.content;
+			} else {
+				this.repoReadContextText = result.content;
+			}
+			this.panel.webview.postMessage({
+				type: 'blueprintChatContextRead',
+				mode: request.mode,
+				path: result.relativePath,
+				contextText: result.content
+			});
+		} catch (error: any) {
+			this.panel.webview.postMessage({
+				type: 'blueprintChatContextRead',
+				mode: request.mode,
 				error: error?.message ?? String(error)
 			});
 		}
@@ -618,7 +744,7 @@ export class BlueprintPanel {
           <div id="modeBadge" class="mode-badge mode-chat">Mode: Repo Chat</div>
           <button id="graphifyContextIndicator" class="graphify-pill off" title="Toggle Graphify Context" aria-label="Toggle Graphify Context">Graphify Context: Off</button>
           <button id="copyChatBtn" class="icon-btn" title="Copy chat transcript" aria-label="Copy chat transcript">⧉</button>
-          <div id="status" class="status">Use /chat for repo Q&A, /start for blueprint session, /generate to build spec, /save to save spec, /end to export and end, /clear to reset visible chat.</div>
+          <div id="status" class="status">Commands: /chat, /start, /generate, /save, /end, /clear, /export file.md -e|-u, /read file.md.</div>
         </div>
       </div>
       <div id="chat" class="chat"></div>
@@ -692,6 +818,10 @@ export class BlueprintPanel {
       history: [],
       blueprintHistory: [],
       repoHistory: [],
+      readContextByMode: {
+        blueprint: '',
+        chat: ''
+      },
       artifacts: null,
       graphifyContextEnabled: ${initialGraphifyContextEnabledJson},
       forcedFeatureId: null,
@@ -1002,6 +1132,44 @@ export class BlueprintPanel {
         clearBlueprintChat({ keepMode: true });
         return;
       }
+      const exportMatch = message.match(/^\\/export\\s+([^\\s]+)(?:\\s+(-e|-u))?\\s*$/i);
+      if (exportMatch) {
+        const fileName = String(exportMatch[1] || '').trim();
+        const flag = String(exportMatch[2] || '-u').toLowerCase();
+        const exportMode = flag === '-e' ? 'edit' : 'update';
+        if (!fileName) {
+          setStatus('Usage: /export <filename.md> -e|-u');
+          return;
+        }
+        userInput.value = '';
+        setBusy(true);
+        setStatus(exportMode === 'edit' ? 'Exporting incremental chat update...' : 'Exporting full chat transcript...');
+        vscode.postMessage({
+          type: 'blueprintExportChatTranscript',
+          mode: state.mode,
+          fileName,
+          exportMode,
+          history: state.mode === 'blueprint' ? state.blueprintHistory : state.repoHistory
+        });
+        return;
+      }
+      const readMatch = message.match(/^\\/read\\s+(.+)$/i);
+      if (readMatch) {
+        const fileName = String(readMatch[1] || '').trim();
+        if (!fileName) {
+          setStatus('Usage: /read <filename.md>');
+          return;
+        }
+        userInput.value = '';
+        setBusy(true);
+        setStatus('Loading markdown context...');
+        vscode.postMessage({
+          type: 'blueprintReadChatContext',
+          mode: state.mode,
+          fileName
+        });
+        return;
+      }
       addHistory('user', message);
       if (state.mode === 'blueprint') {
         state.blueprintHistory.push({ role: 'user', text: message });
@@ -1016,14 +1184,16 @@ export class BlueprintPanel {
         vscode.postMessage({
           type: 'blueprintUserTurn',
           userMessage: message,
-          history: state.blueprintHistory
+          history: state.blueprintHistory,
+          extraContextText: state.readContextByMode.blueprint || undefined
         });
       } else {
         setStatus('Answering project/repo question...');
         vscode.postMessage({
           type: 'blueprintRepoChat',
           userMessage: message,
-          history: state.repoHistory
+          history: state.repoHistory,
+          extraContextText: state.readContextByMode.chat || undefined
         });
       }
     }
@@ -1045,7 +1215,8 @@ export class BlueprintPanel {
       vscode.postMessage({
         type: 'blueprintGeneratePrompt',
         history: state.blueprintHistory,
-        forcedFeatureId: state.forcedFeatureId || undefined
+        forcedFeatureId: state.forcedFeatureId || undefined,
+        extraContextText: state.readContextByMode.blueprint || undefined
       });
     }
 
@@ -1133,6 +1304,37 @@ export class BlueprintPanel {
       if (msg.type === 'graphifyContextState') {
         state.graphifyContextEnabled = !!msg.enabled;
         updateGraphifyContextIndicator();
+        return;
+      }
+      if (msg.type === 'blueprintChatExported') {
+        setBusy(false);
+        if (msg.error) {
+          setStatus('Export failed: ' + String(msg.error));
+          return;
+        }
+        if (msg.skipped) {
+          setStatus(String(msg.message || 'No new updates to export.'));
+          return;
+        }
+        const modeLabel = msg.mode === 'blueprint' ? 'Blueprint' : 'Repo';
+        const createdLabel = msg.created ? 'created' : 'updated';
+        const exportModeText = msg.exportMode === 'edit' ? 'incremental (-e)' : 'rewrite (-u)';
+        const turnsText = typeof msg.exportedTurns === 'number' ? ' | turns: ' + msg.exportedTurns : '';
+        setStatus(modeLabel + ' chat ' + createdLabel + ' [' + exportModeText + ']: ' + String(msg.path || 'markdown file') + turnsText);
+        metaEl.textContent = 'Transcript export complete.';
+        return;
+      }
+      if (msg.type === 'blueprintChatContextRead') {
+        setBusy(false);
+        if (msg.error) {
+          setStatus('Read failed: ' + String(msg.error));
+          return;
+        }
+        const mode = msg.mode === 'blueprint' ? 'blueprint' : 'chat';
+        const contextText = String(msg.contextText || '');
+        state.readContextByMode[mode] = contextText;
+        setStatus('Context loaded for ' + (mode === 'blueprint' ? 'Blueprint' : 'Repo') + ' mode from ' + String(msg.path || 'markdown file'));
+        metaEl.textContent = 'Loaded context characters: ' + contextText.length;
         return;
       }
 

@@ -1,11 +1,14 @@
 export const circuitStyles = `
     html, body { height: 100%; }
+    :root {
+      --relation-chat-width: clamp(300px, 30vw, 390px);
+    }
     body { margin: 0; overflow: hidden; background: #070b18; color: #e2e8f0; font-family: Segoe UI, Tahoma, sans-serif; }
     #hud {
       position: absolute;
       top: 10px;
       left: 10px;
-      right: 10px;
+      right: calc(var(--relation-chat-width) + 22px);
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
@@ -255,7 +258,7 @@ export const circuitStyles = `
       #hud {
         top: 8px;
         left: 8px;
-        right: 8px;
+        right: calc(var(--relation-chat-width) + 14px);
         gap: 6px;
       }
       .card {
@@ -271,85 +274,201 @@ export const circuitStyles = `
         padding: 4px 7px;
       }
     }
-    #aiInsights {
-      margin-top: 8px;
-      color: #d6e3f5;
-      font-size: 11px;
-      border: 1px solid rgba(55, 86, 134, 0.72);
-      background: rgba(10, 26, 52, 0.55);
-      border-radius: 9px;
+    .relation-chat-drawer {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: var(--relation-chat-width);
+      max-height: calc(100vh - 20px);
+      border: 1px solid rgba(60, 90, 136, 0.84);
+      border-radius: 11px;
+      background: linear-gradient(180deg, rgba(14, 24, 49, 0.92), rgba(10, 17, 35, 0.95));
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.34);
+      backdrop-filter: blur(11px);
+      pointer-events: auto;
+      z-index: 40;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .relation-chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
       padding: 8px 10px;
-      line-height: 1.5;
-      max-height: 220px;
-      overflow: auto;
+      border-bottom: 1px solid rgba(56, 85, 128, 0.72);
+      background: rgba(13, 24, 46, 0.84);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    .relation-chat-header-copy {
+      min-width: 0;
+    }
+    .relation-chat-title {
+      font-size: 11px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: #dbeafe;
+      margin-bottom: 3px;
+    }
+    .relation-chat-subtitle {
+      color: #b8cae7;
+      font-size: 11px;
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 250px;
+    }
+    .relation-chat-toggle-btn {
+      width: 28px;
+      height: 24px;
+      border: 1px solid rgba(90, 117, 162, 0.45);
+      border-radius: 7px;
+      background: rgba(15, 27, 52, 0.5);
+      color: #e5efff;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+    .relation-chat-toggle-btn:hover {
+      background: rgba(37, 66, 108, 0.95);
+      border-color: rgba(156, 199, 255, 0.62);
+    }
+    .relation-chat-body {
+      display: flex;
+      flex-direction: column;
+      min-height: 260px;
+      max-height: calc(100vh - 84px);
+    }
+    body.relation-chat-collapsed .relation-chat-body {
       display: none;
     }
-    #aiInsights .ai-md-block {
-      font-size: 12px;
+    .relation-chat-timeline {
+      flex: 1;
+      min-height: 140px;
+      overflow: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: rgba(8, 20, 38, 0.4);
+    }
+    .relation-chat-msg {
+      border-radius: 9px;
+      border: 1px solid rgba(55, 86, 134, 0.72);
+      background: rgba(10, 26, 52, 0.62);
+      padding: 8px 9px;
+      line-height: 1.45;
+      font-size: 11px;
       color: #d6e3f5;
-      line-height: 1.55;
+      max-width: 95%;
+      align-self: flex-start;
+      white-space: normal;
     }
-    #aiInsights .ai-md-sep {
-      border: none;
-      border-top: 1px solid rgba(84, 117, 171, 0.45);
-      margin: 8px 0;
+    .relation-chat-msg.user {
+      align-self: flex-end;
+      background: rgba(22, 163, 74, 0.26);
+      border-color: rgba(34, 197, 94, 0.68);
+      color: #dcfce7;
     }
-    #aiInsights .ai-md-block p {
-      margin: 5px 0;
+    .relation-chat-msg.system {
+      background: rgba(25, 39, 67, 0.72);
+      border-color: rgba(84, 117, 171, 0.64);
+      color: #c6d8f5;
     }
-    #aiInsights .ai-md-block ul,
-    #aiInsights .ai-md-block ol {
+    .relation-chat-msg.error {
+      background: rgba(83, 24, 24, 0.6);
+      border-color: rgba(185, 86, 86, 0.88);
+      color: #ffd5d5;
+    }
+    .relation-chat-msg .ai-md-block {
+      font-size: 11px;
+      line-height: 1.5;
+      color: inherit;
+    }
+    .relation-chat-msg .ai-md-block p {
+      margin: 4px 0;
+    }
+    .relation-chat-msg .ai-md-block ul,
+    .relation-chat-msg .ai-md-block ol {
       margin: 6px 0 6px 16px;
       padding: 0;
     }
-    #aiInsights .ai-md-block li {
-      margin: 3px 0;
-    }
-    #aiInsights .ai-md-block h1,
-    #aiInsights .ai-md-block h2,
-    #aiInsights .ai-md-block h3 {
-      margin: 7px 0 5px;
+    .relation-chat-msg .ai-md-block h1,
+    .relation-chat-msg .ai-md-block h2,
+    .relation-chat-msg .ai-md-block h3 {
+      margin: 6px 0 4px;
       color: #eff6ff;
       line-height: 1.35;
     }
-    #aiInsights .ai-md-block h1 { font-size: 14px; }
-    #aiInsights .ai-md-block h2 { font-size: 13px; }
-    #aiInsights .ai-md-block h3 { font-size: 12px; }
-    #aiInsights .ai-md-block code {
+    .relation-chat-msg .ai-md-block h1 { font-size: 13px; }
+    .relation-chat-msg .ai-md-block h2 { font-size: 12px; }
+    .relation-chat-msg .ai-md-block h3 { font-size: 11px; }
+    .relation-chat-msg .ai-md-block code {
       background: rgba(10, 18, 36, 0.9);
       border: 1px solid rgba(84, 117, 171, 0.45);
-      border-radius: 5px;
+      border-radius: 4px;
       padding: 1px 4px;
       font-family: Consolas, "Courier New", monospace;
-      font-size: 11px;
+      font-size: 10px;
       color: #e2e8f0;
     }
-    #aiInsights .ai-md-block pre {
+    .relation-chat-msg .ai-md-block pre {
       background: rgba(8, 15, 30, 0.95);
       border: 1px solid rgba(84, 117, 171, 0.45);
       border-radius: 6px;
-      padding: 7px;
+      padding: 6px;
       overflow: auto;
       margin: 6px 0;
       white-space: pre;
     }
-    #aiInsights .ai-md-block pre code {
+    .relation-chat-msg .ai-md-block pre code {
       border: none;
       background: transparent;
       padding: 0;
     }
-    #aiSuggestions {
-      margin-top: 8px;
-      color: #d6e3f5;
+    .relation-chat-footer {
+      border-top: 1px solid rgba(56, 85, 128, 0.72);
+      padding: 8px;
+      background: rgba(8, 16, 35, 0.9);
+      display: grid;
+      gap: 7px;
+    }
+    .relation-chat-composer-row {
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+    }
+    .relation-chat-input {
+      flex: 1;
+      min-height: 36px;
+      max-height: 110px;
+      resize: vertical;
+      border-radius: 8px;
+      border: 1px solid rgba(84, 117, 171, 0.75);
+      background: rgba(12, 22, 44, 0.82);
+      color: #dce7f8;
+      padding: 7px 8px;
+      font: inherit;
       font-size: 11px;
-      border: 1px solid rgba(55, 86, 134, 0.72);
-      background: rgba(10, 26, 52, 0.55);
-      border-radius: 9px;
-      padding: 8px 10px;
-      line-height: 1.45;
-      max-height: 150px;
-      overflow: auto;
-      display: none;
+      line-height: 1.35;
+      box-sizing: border-box;
+    }
+    .relation-chat-input:focus {
+      outline: none;
+      border-color: rgba(34, 197, 94, 0.85);
+      box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.42);
+    }
+    body.relation-chat-collapsed .relation-chat-drawer {
+      max-height: 50px;
+    }
+    body.relation-chat-collapsed .relation-chat-toggle-btn {
+      color: #bbf7d0;
     }
     .ai-suggestions-title {
       color: #dbeafe;
@@ -396,17 +515,6 @@ export const circuitStyles = `
       color: #a8bbd9;
       font-size: 11px;
       margin-top: 2px;
-    }
-    #relationState {
-      margin-top: 8px;
-      color: #c7d7ef;
-      font-size: 11px;
-      border: 1px solid rgba(55, 86, 134, 0.62);
-      background: rgba(8, 20, 38, 0.66);
-      border-radius: 8px;
-      padding: 7px 9px;
-      line-height: 1.45;
-      white-space: normal;
     }
     #details {
       white-space: pre-wrap;
@@ -518,5 +626,36 @@ export const circuitStyles = `
     #fabMenu button:hover {
       background: rgba(34, 197, 94, 0.15);
       border-color: rgba(34, 197, 94, 0.35);
+    }
+    @media (max-width: 980px) {
+      :root {
+        --relation-chat-width: clamp(250px, 36vw, 320px);
+      }
+      .relation-chat-drawer {
+        top: 8px;
+        right: 8px;
+      }
+      .relation-chat-subtitle {
+        max-width: 190px;
+      }
+    }
+    @media (max-width: 760px) {
+      #hud {
+        right: 8px;
+      }
+      .relation-chat-drawer {
+        left: 8px;
+        right: 8px;
+        width: auto;
+        top: auto;
+        bottom: 8px;
+        max-height: min(52vh, 420px);
+      }
+      .relation-chat-body {
+        max-height: min(52vh, 380px);
+      }
+      body.relation-chat-collapsed .relation-chat-drawer {
+        max-height: 50px;
+      }
     }
 `;

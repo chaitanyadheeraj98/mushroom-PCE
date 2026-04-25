@@ -517,21 +517,26 @@ export function activateApp(context: vscode.ExtensionContext) {
 
 	const requestCircuitRelationExplain = async (
 		graph: CircuitGraph,
-		fromNodeId: string,
-		toNodeId: string
+		options: { fromNodeId?: string; toNodeId?: string; userPrompt?: string; extraContextText?: string }
 	): Promise<string | undefined> => {
 		await loadModels();
 		const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
 		if (!model) {
 			return undefined;
 		}
-		const relationKey = `circuit-ai-relation:${model.id}:${fromNodeId}:${toNodeId}:${graph.nodes.length}:${graph.edges.length}`;
+		const fromNodeId = options.fromNodeId || '';
+		const toNodeId = options.toNodeId || '';
+		const userPrompt = (options.userPrompt || '').trim();
+		if (!fromNodeId && !toNodeId && !userPrompt) {
+			return undefined;
+		}
+		const relationKey = `circuit-ai-relation:${model.id}:${fromNodeId}:${toNodeId}:${userPrompt}:${graph.nodes.length}:${graph.edges.length}`;
 		return aiJobs.schedule<string | undefined>({
 			lane: 'circuit-ai',
 			key: relationKey,
 			group: 'circuit-ai:relation',
 			priority: 25,
-			run: async (signal) => explainCircuitNodeRelationWithAi(model, graph, fromNodeId, toNodeId, signal)
+			run: async (signal) => explainCircuitNodeRelationWithAi(model, graph, options, signal)
 		});
 	};
 
@@ -695,6 +700,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 							request.history as BlueprintConversationTurn[],
 							workspace,
 							graphifyContextText,
+							request.extraContextText,
 							signal
 						);
 						return reply;
@@ -749,6 +755,10 @@ export function activateApp(context: vscode.ExtensionContext) {
 							workspaceFns,
 							'',
 							graphifyContextText?.trim() ? ['Graphify context:', graphifyContextText.trim()].join('\n') : ''
+							,
+							request.extraContextText?.trim()
+								? ['Extra context loaded via /read:', request.extraContextText.trim()].join('\n')
+								: ''
 						].filter(Boolean).join('\n');
 						const response = await requestModelText(model, prompt, { signal });
 						const raw = String(response || '').trim() || 'No response generated.';
@@ -783,6 +793,7 @@ export function activateApp(context: vscode.ExtensionContext) {
 							request.history as BlueprintConversationTurn[],
 							workspace,
 							graphifyContextText,
+							request.extraContextText,
 							signal
 						);
 						const workspaceFolder = vscode.workspace.workspaceFolders?.[0];

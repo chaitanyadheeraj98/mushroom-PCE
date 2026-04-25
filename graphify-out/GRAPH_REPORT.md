@@ -1,12 +1,12 @@
-# Graph Report - D:\My Websites\Mushroom\mushroom-pce  (2026-04-24)
+# Graph Report - D:\My Websites\Mushroom\mushroom-pce  (2026-04-25)
 
 ## Corpus Check
-- 55 files · ~95,196 words
+- 56 files · ~99,963 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 472 nodes · 858 edges · 38 communities detected
-- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 78 edges (avg confidence: 0.8)
+- 490 nodes · 902 edges · 38 communities detected
+- Extraction: 90% EXTRACTED · 10% INFERRED · 0% AMBIGUOUS · INFERRED: 89 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -53,12 +53,12 @@
 1. `collectTypeScriptConcepts()` - 29 edges
 2. `addUnique()` - 22 edges
 3. `MushroomPanel` - 19 edges
-4. `getNodeGraphifyEvidence()` - 15 edges
-5. `loadGraphifySmartQueryContext()` - 12 edges
-6. `CircuitDetailsPanel` - 12 edges
-7. `buildCircuitGraphHybrid()` - 12 edges
-8. `collectCallHierarchyFileNeighbors()` - 12 edges
-9. `BlueprintPanel` - 11 edges
+4. `CircuitDetailsPanel` - 15 edges
+5. `getNodeGraphifyEvidence()` - 15 edges
+6. `BlueprintPanel` - 13 edges
+7. `loadGraphifySmartQueryContext()` - 12 edges
+8. `buildCircuitGraphHybrid()` - 12 edges
+9. `collectCallHierarchyFileNeighbors()` - 12 edges
 10. `AiJobOrchestrator` - 11 edges
 
 ## Surprising Connections (you probably didn't know these)
@@ -80,8 +80,8 @@ Cohesion: 0.09
 Nodes (52): addUnique(), buildGenericConceptOutput(), buildListModeOutput(), buildTypeScriptConceptOutput(), cleanTypeText(), collectClass(), collectExportNames(), collectImport() (+44 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.1
-Nodes (23): AiJobCancelledError, AiJobOrchestrator, isAiJobCancelledError(), AnalysisCache, collectMessageTypeCheck(), getStringLiteralComparisonValue(), explainCircuitNodeRelationWithAi(), findShortestPath() (+15 more)
+Cohesion: 0.09
+Nodes (24): AiJobCancelledError, AiJobOrchestrator, isAiJobCancelledError(), AnalysisCache, collectMessageTypeCheck(), getStringLiteralComparisonValue(), buildGraphSummary(), explainCircuitNodeRelationWithAi() (+16 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.09
@@ -96,40 +96,40 @@ Cohesion: 0.13
 Nodes (32): askBlueprintChat(), buildArtifactsPrompt(), buildImplementationPrompt(), buildJsonRepairPrompt(), buildLineStarts(), buildPlanningTurnPrompt(), buildTargetedFunctionContext(), continueBlueprintPlanningTurn() (+24 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.17
-Nodes (11): CircuitDetailsPanel, describeEdge(), getFileSnippet(), getImportsBlockSnippet(), getNonce(), getSnippet(), isImportsNode(), renderEmptyHtml() (+3 more)
+Cohesion: 0.11
+Nodes (13): BlueprintPanel, getNonce(), buildChatTranscriptMarkdown(), ensureParentDirectory(), exportChatMarkdownFile(), fileExists(), normalizeFsPathForCompare(), normalizeRelativeMarkdownPath() (+5 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.15
-Nodes (18): analyzeNode(), buildArchitectureHierarchy(), buildCircuitGraph(), buildDeclarationFlow(), collectFunctions(), collectFunctionSignals(), createFunctionInfo(), dedupeFunctions() (+10 more)
+Nodes (11): CircuitDetailsPanel, describeEdge(), getFileSnippet(), getImportsBlockSnippet(), getNonce(), getSnippet(), isImportsNode(), renderEmptyHtml() (+3 more)
 
 ### Community 7 - "Community 7"
+Cohesion: 0.15
+Nodes (18): analyzeNode(), buildArchitectureHierarchy(), buildCircuitGraph(), buildDeclarationFlow(), collectFunctions(), collectFunctionSignals(), createFunctionInfo(), dedupeFunctions() (+10 more)
+
+### Community 8 - "Community 8"
 Cohesion: 0.2
 Nodes (18): buildProjectArchitectureGraph(), collectCallHierarchyFileNeighbors(), extractModuleSpecifiers(), flattenFunctionSymbols(), isDeclarationFilePath(), isDeclarationFileUri(), isDocumentSymbolArray(), isLikelyCodeUri() (+10 more)
 
-### Community 8 - "Community 8"
+### Community 9 - "Community 9"
 Cohesion: 0.22
 Nodes (18): addConfidenceTag(), buildCircuitGraphHybrid(), buildDeclarationFileHintGraph(), classifyLayerFromName(), edgeSignature(), ensureNodeForItem(), findNodeByLocation(), isDeclarationFilePath() (+10 more)
 
-### Community 9 - "Community 9"
+### Community 10 - "Community 10"
 Cohesion: 0.25
 Nodes (17): buildAdaptiveQueries(), buildCacheKey(), buildPathPairs(), capText(), collectFileMentions(), collectNeighborEvidence(), fallback(), formatReason() (+9 more)
-
-### Community 10 - "Community 10"
-Cohesion: 0.15
-Nodes (5): buildCircuitHtml(), CircuitPanel, buildCircuitWebviewScript(), buildCircuitPanelHtml(), getNonce()
 
 ### Community 11 - "Community 11"
 Cohesion: 0.26
 Nodes (16): buildCandidateRecord(), decodeUtf8(), findBestFeatureMatch(), fnv1a(), generateFeatureId(), listBlueprintFeatureOptions(), loadBlueprintFeatureRegistry(), normalizePath() (+8 more)
 
 ### Community 12 - "Community 12"
-Cohesion: 0.22
-Nodes (12): buildBlueprintGraph(), buildBlueprintPrompt(), generateBlueprintPlan(), mapPlanNode(), normalizePlanNodes(), parseBlueprintEnvelope(), safeJson(), buildCompactGraphContext() (+4 more)
+Cohesion: 0.16
+Nodes (5): buildCircuitHtml(), CircuitPanel, buildCircuitWebviewScript(), buildCircuitPanelHtml(), getNonce()
 
 ### Community 13 - "Community 13"
-Cohesion: 0.16
-Nodes (2): BlueprintPanel, getNonce()
+Cohesion: 0.22
+Nodes (12): buildBlueprintGraph(), buildBlueprintPrompt(), generateBlueprintPlan(), mapPlanNode(), normalizePlanNodes(), parseBlueprintEnvelope(), safeJson(), buildCompactGraphContext() (+4 more)
 
 ### Community 14 - "Community 14"
 Cohesion: 0.29
@@ -261,16 +261,16 @@ Nodes (0):
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `collectMessageTypeCheck()` connect `Community 1` to `Community 0`?**
-  _High betweenness centrality (0.182) - this node is a cross-community bridge._
-- **Why does `requestModelText()` connect `Community 4` to `Community 16`, `Community 1`, `Community 12`?**
+  _High betweenness centrality (0.183) - this node is a cross-community bridge._
+- **Why does `requestModelText()` connect `Community 4` to `Community 16`, `Community 1`, `Community 13`?**
   _High betweenness centrality (0.142) - this node is a cross-community bridge._
 - **Why does `explainCircuitNodeRelationWithAi()` connect `Community 1` to `Community 4`?**
-  _High betweenness centrality (0.113) - this node is a cross-community bridge._
+  _High betweenness centrality (0.118) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `getNodeGraphifyEvidence()` (e.g. with `.get()` and `.set()`) actually correct?**
   _`getNodeGraphifyEvidence()` has 2 INFERRED edges - model-reasoned connections that need verification._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.09 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**
-  _Cohesion score 0.1 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
 - **Should `Community 2` be split into smaller, more focused modules?**
   _Cohesion score 0.09 - nodes in this community are weakly interconnected._

@@ -271,6 +271,7 @@ type NodePromptRequest = {
 	snippet: string;
 	developerAnalysis?: string;
 	question: string;
+	extraContextText?: string;
 	history: Array<{ role: 'user' | 'assistant'; text: string }>;
 	connectionContext: {
 		incoming: string[];
@@ -330,6 +331,9 @@ ${historyText || '(no previous history)'}
 Graphify Node Evidence:
 ${formatNodeGraphifyEvidence(request.graphifyEvidence)}
 
+Extra Context (/read):
+${request.extraContextText?.trim() ? request.extraContextText.trim() : '(none loaded)'}
+
 User Question:
 ${request.question}
 `;
@@ -366,6 +370,9 @@ ${historyText || '(no previous history)'}
 
 Graphify Node Evidence:
 ${formatNodeGraphifyEvidence(request.graphifyEvidence)}
+
+Extra Context (/read):
+${request.extraContextText?.trim() ? request.extraContextText.trim() : '(none loaded)'}
 
 User Question:
 ${request.question}

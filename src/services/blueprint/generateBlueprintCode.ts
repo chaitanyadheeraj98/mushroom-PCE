@@ -140,9 +140,10 @@ export async function continueBlueprintPlanningTurn(
 	history: BlueprintConversationTurn[],
 	workspace: BlueprintWorkspaceSnapshot | undefined,
 	graphifyContextText?: string,
+	extraContextText?: string,
 	signal?: AbortSignal
 ): Promise<BlueprintPlannerAssistantTurn> {
-	const prompt = buildPlanningTurnPrompt(userMessage, history, workspace, graphifyContextText);
+	const prompt = buildPlanningTurnPrompt(userMessage, history, workspace, graphifyContextText, extraContextText);
 	const response = await requestModelText(model, prompt, { signal });
 	const parseResult = await parseEnvelopeWithRepair<PlannerTurnEnvelope>(
 		model,
@@ -175,9 +176,10 @@ export async function generateBlueprintPlanningArtifacts(
 	history: BlueprintConversationTurn[],
 	workspace: BlueprintWorkspaceSnapshot | undefined,
 	graphifyContextText?: string,
+	extraContextText?: string,
 	signal?: AbortSignal
 ): Promise<BlueprintPlanningArtifacts> {
-	const prompt = buildArtifactsPrompt(history, workspace, graphifyContextText);
+	const prompt = buildArtifactsPrompt(history, workspace, graphifyContextText, extraContextText);
 	const response = await requestModelText(model, prompt, { signal });
 	const parseResult = await parseEnvelopeWithRepair<PlannerSpecEnvelope>(
 		model,
@@ -207,7 +209,8 @@ function buildPlanningTurnPrompt(
 	userMessage: string,
 	history: BlueprintConversationTurn[],
 	workspace: BlueprintWorkspaceSnapshot | undefined,
-	graphifyContextText?: string
+	graphifyContextText?: string,
+	extraContextText?: string
 ): string {
 	const graphifySection = graphifyContextText?.trim()
 		? [
@@ -254,6 +257,10 @@ function buildPlanningTurnPrompt(
 		'',
 		graphifySection,
 		'',
+		extraContextText?.trim()
+			? ['Extra context loaded via /read command:', extraContextText.trim()].join('\n')
+			: 'Extra context loaded via /read command: none.',
+		'',
 		'Recent Conversation:',
 		...history.slice(-18).map((turn) => `${turn.role.toUpperCase()}: ${sanitizePromptText(turn.text, 1200)}`),
 		'',
@@ -264,7 +271,8 @@ function buildPlanningTurnPrompt(
 function buildArtifactsPrompt(
 	history: BlueprintConversationTurn[],
 	workspace: BlueprintWorkspaceSnapshot | undefined,
-	graphifyContextText?: string
+	graphifyContextText?: string,
+	extraContextText?: string
 ): string {
 	const graphifySection = graphifyContextText?.trim()
 		? [
@@ -312,6 +320,10 @@ function buildArtifactsPrompt(
 		renderWorkspaceContext(workspace),
 		'',
 		graphifySection,
+		'',
+		extraContextText?.trim()
+			? ['Extra context loaded via /read command:', extraContextText.trim()].join('\n')
+			: 'Extra context loaded via /read command: none.',
 		'',
 		'Conversation:',
 		...history.slice(-30).map((turn) => `${turn.role.toUpperCase()}: ${sanitizePromptText(turn.text, 1400)}`)
