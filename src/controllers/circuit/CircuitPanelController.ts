@@ -3,6 +3,11 @@ import * as vscode from 'vscode';
 import { CircuitDetailsPanel } from './CircuitDetailsPanelController';
 import { CircuitAiEnrichmentResult, CircuitGraph, CircuitNode } from '../../shared/types/circuitTypes';
 import { buildCircuitPanelHtml } from '../../views/circuit/circuitWebview';
+import {
+	buildChatTranscriptMarkdown,
+	exportChatMarkdownFile,
+	readChatMarkdownFile
+} from '../../services/chat/chatSessionMarkdown';
 
 export class CircuitPanel {
 	private static currentPanel: CircuitPanel | undefined;
@@ -16,15 +21,20 @@ export class CircuitPanel {
 		currentGraph: CircuitGraph,
 		options?: { dependencyMode?: 'imports' | 'imports-calls' }
 	) => Promise<CircuitGraph | undefined>;
-	private readonly onRequestAiEnrichment?: (currentGraph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>;
+	private readonly onRequestAiEnrichment?: (
+		currentGraph: CircuitGraph,
+		scope?: 'current-file' | 'full-architecture' | 'codeflow'
+	) => Promise<CircuitAiEnrichmentResult | undefined>;
 	private readonly onRequestAiRelationExplain?: (
 		currentGraph: CircuitGraph,
-		fromNodeId: string,
-		toNodeId: string
+		options: { fromNodeId?: string; toNodeId?: string; userPrompt?: string; extraContextText?: string }
 	) => Promise<string | undefined>;
 	private graph: CircuitGraph;
+	private graphifyContextEnabled = false;
 	private readonly isPrimaryPanel: boolean;
 	private lastUnresolvedNodeId?: string;
+	private relationChatExtraContextText = '';
+	private readonly relationExportCursorByFile = new Map<string, number>();
 
 	static createOrShow(
 		extensionUri: vscode.Uri,
@@ -36,10 +46,26 @@ export class CircuitPanel {
 			currentGraph: CircuitGraph,
 			options?: { dependencyMode?: 'imports' | 'imports-calls' }
 		) => Promise<CircuitGraph | undefined>,
-		onRequestAiEnrichment?: (currentGraph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>,
-		onRequestAiRelationExplain?: (currentGraph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>
+		onRequestAiEnrichment?: (
+			currentGraph: CircuitGraph,
+			scope?: 'current-file' | 'full-architecture' | 'codeflow'
+		) => Promise<CircuitAiEnrichmentResult | undefined>,
+		onRequestAiRelationExplain?: (
+			currentGraph: CircuitGraph,
+			options: { fromNodeId?: string; toNodeId?: string; userPrompt?: string; extraContextText?: string }
+		) => Promise<string | undefined>
+		,
+		options?: { initialGraphifyContextEnabled?: boolean }
 	): CircuitPanel {
 		if (CircuitPanel.currentPanel) {
+			if (typeof options?.initialGraphifyContextEnabled === 'boolean') {
+				CircuitPanel.currentPanel.graphifyContextEnabled = options.initialGraphifyContextEnabled;
+				CircuitPanel.currentPanel.panel.webview.postMessage({
+					type: 'graphifyContextState',
+					enabled: options.initialGraphifyContextEnabled
+				});
+				CircuitDetailsPanel.setGraphifyContextEnabled(options.initialGraphifyContextEnabled);
+			}
 			CircuitPanel.currentPanel.panel.reveal(vscode.ViewColumn.Beside);
 			CircuitPanel.currentPanel.setGraph(graph);
 			return CircuitPanel.currentPanel;
@@ -62,10 +88,21 @@ export class CircuitPanel {
 			onRequestAiEnrichment,
 			onRequestAiRelationExplain,
 			{
+			initialGraphifyContextEnabled: options?.initialGraphifyContextEnabled,
 			isPrimaryPanel: true
 			}
 		);
 		return CircuitPanel.currentPanel;
+	}
+
+	static setGraphifyContextEnabled(enabled: boolean): void {
+		const panel = CircuitPanel.currentPanel;
+		if (!panel) {
+			return;
+		}
+		panel.graphifyContextEnabled = enabled;
+		panel.panel.webview.postMessage({ type: 'graphifyContextState', enabled });
+		CircuitDetailsPanel.setGraphifyContextEnabled(enabled);
 	}
 
 	private constructor(
@@ -79,9 +116,20 @@ export class CircuitPanel {
 			currentGraph: CircuitGraph,
 			options?: { dependencyMode?: 'imports' | 'imports-calls' }
 		) => Promise<CircuitGraph | undefined>,
-		onRequestAiEnrichment?: (currentGraph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>,
-		onRequestAiRelationExplain?: (currentGraph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>,
-		options?: { initialSkeletonRootNodeId?: string; initialViewMode?: 'architecture' | 'runtime'; isPrimaryPanel?: boolean }
+		onRequestAiEnrichment?: (
+			currentGraph: CircuitGraph,
+			scope?: 'current-file' | 'full-architecture' | 'codeflow'
+		) => Promise<CircuitAiEnrichmentResult | undefined>,
+		onRequestAiRelationExplain?: (
+			currentGraph: CircuitGraph,
+			options: { fromNodeId?: string; toNodeId?: string; userPrompt?: string; extraContextText?: string }
+		) => Promise<string | undefined>,
+		options?: {
+			initialSkeletonRootNodeId?: string;
+			initialViewMode?: 'architecture' | 'runtime';
+			isPrimaryPanel?: boolean;
+			initialGraphifyContextEnabled?: boolean;
+		}
 	) {
 		this.panel = panel;
 		this.extensionUri = extensionUri;
@@ -91,6 +139,7 @@ export class CircuitPanel {
 		this.onRequestGraph = onRequestGraph;
 		this.onRequestAiEnrichment = onRequestAiEnrichment;
 		this.onRequestAiRelationExplain = onRequestAiRelationExplain;
+		this.graphifyContextEnabled = Boolean(options?.initialGraphifyContextEnabled);
 		this.isPrimaryPanel = options?.isPrimaryPanel ?? false;
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 		this.panel.webview.onDidReceiveMessage(
@@ -141,7 +190,11 @@ export class CircuitPanel {
 				}
 				if (msg?.type === 'requestAiEnrichment' && this.onRequestAiEnrichment) {
 					try {
-						const result = await this.onRequestAiEnrichment(this.graph);
+						const scope =
+							msg?.scope === 'full-architecture' || msg?.scope === 'codeflow' || msg?.scope === 'current-file'
+								? msg.scope
+								: 'current-file';
+						const result = await this.onRequestAiEnrichment(this.graph, scope);
 						this.panel.webview.postMessage({ type: 'aiEnrichment', result });
 					} catch (error: any) {
 						this.panel.webview.postMessage({
@@ -153,24 +206,119 @@ export class CircuitPanel {
 				}
 				if (
 					msg?.type === 'requestAiRelationExplain' &&
-					this.onRequestAiRelationExplain &&
-					typeof msg?.fromNodeId === 'string' &&
-					typeof msg?.toNodeId === 'string'
+					this.onRequestAiRelationExplain
 				) {
-					try {
-						const text = await this.onRequestAiRelationExplain(this.graph, msg.fromNodeId, msg.toNodeId);
+					const fromNodeId = typeof msg?.fromNodeId === 'string' ? msg.fromNodeId : undefined;
+					const toNodeId = typeof msg?.toNodeId === 'string' ? msg.toNodeId : undefined;
+					const userPrompt = typeof msg?.userPrompt === 'string' ? msg.userPrompt.trim() : undefined;
+					const hasPair = Boolean(fromNodeId && toNodeId);
+					if (!hasPair && !userPrompt) {
 						this.panel.webview.postMessage({
 							type: 'aiRelationExplain',
-							fromNodeId: msg.fromNodeId,
-							toNodeId: msg.toNodeId,
+							error: 'Relation explain needs a From/To pair or a prompt.'
+						});
+						return;
+					}
+					try {
+						const text = await this.onRequestAiRelationExplain(this.graph, {
+							fromNodeId,
+							toNodeId,
+							userPrompt,
+							extraContextText: this.relationChatExtraContextText
+						});
+						this.panel.webview.postMessage({
+							type: 'aiRelationExplain',
+							fromNodeId,
+							toNodeId,
+							userPrompt,
+							extraContextText: this.relationChatExtraContextText,
 							text
 						});
 					} catch (error: any) {
 						this.panel.webview.postMessage({
 							type: 'aiRelationExplain',
-							fromNodeId: msg.fromNodeId,
-							toNodeId: msg.toNodeId,
+							fromNodeId,
+							toNodeId,
+							userPrompt,
+							extraContextText: this.relationChatExtraContextText,
 							error: error?.message ?? String(error ?? 'Relation explain failed')
+						});
+					}
+					return;
+				}
+				if (msg?.type === 'exportRelationChatTranscript') {
+					const fileName = String(msg?.fileName || '').trim();
+					const exportMode = msg?.exportMode === 'edit' ? 'edit' : 'update';
+					const turns = Array.isArray(msg?.turns) ? msg.turns : [];
+					try {
+						const fileKey = fileName.toLowerCase();
+						const previousCursorRaw = this.relationExportCursorByFile.get(fileKey) ?? 0;
+						const previousCursor = previousCursorRaw > turns.length ? 0 : previousCursorRaw;
+						const exportTurns =
+							exportMode === 'edit'
+								? turns.slice(Math.max(0, previousCursor))
+								: turns;
+						if (exportMode === 'edit' && !exportTurns.length) {
+							this.panel.webview.postMessage({
+								type: 'relationChatExported',
+								fileName,
+								path: fileName,
+								created: false,
+								exportMode,
+								skipped: true,
+								message: 'No new chat turns since last /export ... -e for this file.'
+							});
+							return;
+						}
+						const markdown = buildChatTranscriptMarkdown(
+							'Circuit Relation Chat',
+							exportTurns.map((turn: { role?: string; text?: string }) => ({
+								role: String(turn?.role || 'user'),
+								text: String(turn?.text || '')
+							}))
+						);
+						const result = await exportChatMarkdownFile({
+							fileName,
+							markdown,
+							mode: exportMode
+						});
+						this.relationExportCursorByFile.set(fileKey, turns.length);
+						this.panel.webview.postMessage({
+							type: 'relationChatExported',
+							fileName,
+							path: result.relativePath,
+							created: result.created,
+							exportMode,
+							exportedTurns: exportTurns.length
+						});
+					} catch (error: any) {
+						this.panel.webview.postMessage({
+							type: 'relationChatExported',
+							fileName,
+							exportMode,
+							error: error?.message ?? String(error)
+						});
+					}
+					return;
+				}
+				if (msg?.type === 'readRelationChatContext') {
+					const fileName = String(msg?.fileName || '').trim();
+					try {
+						const result = await readChatMarkdownFile({
+							fileName
+						});
+						this.relationChatExtraContextText = result.content;
+						this.panel.webview.postMessage({
+							type: 'relationChatContextRead',
+							fileName,
+							path: result.relativePath,
+							contextText: result.content
+						});
+					} catch (error: any) {
+						this.panel.webview.postMessage({
+							type: 'relationChatContextRead',
+							fileName,
+							error: error?.message ?? String(error)
 						});
 					}
 				}
@@ -180,7 +328,8 @@ export class CircuitPanel {
 		);
 		this.panel.webview.html = this.getHtml(this.panel.webview, extensionUri, graph, {
 			initialSkeletonRootNodeId: options?.initialSkeletonRootNodeId,
-			initialViewMode: options?.initialViewMode
+			initialViewMode: options?.initialViewMode,
+			initialGraphifyContextEnabled: this.graphifyContextEnabled
 		});
 	}
 
@@ -196,6 +345,7 @@ export class CircuitPanel {
 	setGraph(graph: CircuitGraph): void {
 		this.graph = graph;
 		this.panel.webview.postMessage({ type: 'graph', graph });
+		this.panel.webview.postMessage({ type: 'graphifyContextState', enabled: this.graphifyContextEnabled });
 		void CircuitDetailsPanel.syncGraph(graph);
 	}
 
@@ -234,6 +384,7 @@ export class CircuitPanel {
 			{
 			initialSkeletonRootNodeId: rootNodeId,
 			initialViewMode: 'runtime',
+			initialGraphifyContextEnabled: this.graphifyContextEnabled,
 			isPrimaryPanel: false
 			}
 		);
@@ -244,7 +395,11 @@ export class CircuitPanel {
 		webview: vscode.Webview,
 		extensionUri: vscode.Uri,
 		graph: CircuitGraph,
-		options?: { initialSkeletonRootNodeId?: string; initialViewMode?: 'architecture' | 'runtime' }
+		options?: {
+			initialSkeletonRootNodeId?: string;
+			initialViewMode?: 'architecture' | 'runtime';
+			initialGraphifyContextEnabled?: boolean;
+		}
 	): string {
 		return buildCircuitPanelHtml(webview, extensionUri, graph, options);
 	}

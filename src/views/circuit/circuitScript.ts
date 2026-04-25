@@ -1,7 +1,8 @@
 export function buildCircuitWebviewScript(
 	graphJson: string,
 	initialSkeletonRootNodeIdJson: string,
-	initialViewModeJson: string
+	initialViewModeJson: string,
+	initialGraphifyContextEnabledJson: string
 ): string {
 	return `
     let THREE;
@@ -37,16 +38,17 @@ export function buildCircuitWebviewScript(
     const aiEnrichBtn = document.getElementById('aiEnrichBtn');
     const aiApplyAllBtn = document.getElementById('aiApplyAllBtn');
     const aiRejectAllBtn = document.getElementById('aiRejectAllBtn');
-    const relationSetFromBtn = document.getElementById('relationSetFromBtn');
-    const relationSetToBtn = document.getElementById('relationSetToBtn');
-    const relationExplainBtn = document.getElementById('relationExplainBtn');
-    const relationResetBtn = document.getElementById('relationResetBtn');
     const relationStateEl = document.getElementById('relationState');
+    const relationChatDrawer = document.getElementById('relationChatDrawer');
+    const relationChatHeader = document.getElementById('relationChatHeader');
+    const relationChatBody = document.getElementById('relationChatBody');
+    const relationChatTimeline = document.getElementById('relationChatTimeline');
+    const relationChatToggleBtn = document.getElementById('relationChatToggleBtn');
+    const relationChatInput = document.getElementById('relationChatInput');
     const includeExternalBtn = document.getElementById('includeExternalBtn');
     const disconnectContextBtn = document.getElementById('disconnectContextBtn');
     const modeHint = document.getElementById('modeHint');
-    const aiInsightsEl = document.getElementById('aiInsights');
-    const aiSuggestionsEl = document.getElementById('aiSuggestions');
+    const graphifyContextIndicator = document.getElementById('graphifyContextIndicator');
     const viewLockBtn = document.getElementById('viewLockBtn');
     const hudMinBtn = document.getElementById('hudMinBtn');
     const hudMaxBtn = document.getElementById('hudMaxBtn');
@@ -65,11 +67,13 @@ export function buildCircuitWebviewScript(
     let hudMaximized = false;
     let viewLocked = false;
     let aiNodeSummaryMap = new Map();
-    let aiLastInsightsText = '';
-    let aiLastRelationExplainText = '';
     let aiSuggestedEdgesPending = [];
     let relationFromNodeId = null;
     let relationToNodeId = null;
+    let relationChatCollapsed = false;
+    let relationChatDraft = '';
+    const relationChatMessages = [];
+    let graphifyContextEnabled = ${initialGraphifyContextEnabledJson};
 
     try {
       const saved = vscode?.getState?.();
@@ -96,6 +100,10 @@ export function buildCircuitWebviewScript(
       hudMinimized = !!saved?.hudMinimized;
       hudMaximized = !!saved?.hudMaximized;
       viewLocked = !!saved?.viewLocked;
+      relationChatCollapsed = !!saved?.relationChatCollapsed;
+      relationFromNodeId = typeof saved?.relationFromNodeId === 'string' ? saved.relationFromNodeId : null;
+      relationToNodeId = typeof saved?.relationToNodeId === 'string' ? saved.relationToNodeId : null;
+      relationChatDraft = typeof saved?.relationChatDraft === 'string' ? saved.relationChatDraft : '';
     } catch {}
 
     // Node-RED style 2D node graph (boxes + ports) on the Z=0 plane.
@@ -595,7 +603,6 @@ export function buildCircuitWebviewScript(
       }
       graph.nodes = graph.nodes.filter((node) => node.id !== contextBotId);
       graph.edges = graph.edges.filter((edge) => edge.from !== contextBotId && edge.to !== contextBotId);
-      ctrlConnectSourceNodeId = null;
       buildGraphScene(graph);
       setDetails(null);
       vscode?.postMessage({ type: 'updateGraph', graph });
@@ -1531,7 +1538,6 @@ export function buildCircuitWebviewScript(
     let hoveredNodeId = null;
     let selectedNodeId = null;
     const contextBotId = 'context:bot';
-    let ctrlConnectSourceNodeId = null;
     let dragging = null; // { nodeId, startX, startY, moved }
     if (skeletonRootNodeId) {
       selectedNodeId = skeletonRootNodeId;
@@ -1569,7 +1575,11 @@ export function buildCircuitWebviewScript(
           currentGraphScope: currentGraphScope,
           hudMinimized: hudMinimized,
           hudMaximized: hudMaximized,
-          viewLocked: viewLocked
+          viewLocked: viewLocked,
+          relationChatCollapsed: relationChatCollapsed,
+          relationFromNodeId: relationFromNodeId || undefined,
+          relationToNodeId: relationToNodeId || undefined,
+          relationChatDraft: relationChatDraft
         });
       } catch {}
     }
@@ -1577,6 +1587,7 @@ export function buildCircuitWebviewScript(
     function applyHudState() {
       document.body.classList.toggle('hud-minimized', hudMinimized);
       document.body.classList.toggle('hud-maximized', hudMaximized);
+      document.body.classList.toggle('relation-chat-collapsed', relationChatCollapsed);
       if (hudMinBtn) {
         hudMinBtn.classList.toggle('active', hudMinimized);
         hudMinBtn.title = hudMinimized ? 'Restore HUD' : 'Minimize HUD';
@@ -1610,6 +1621,14 @@ export function buildCircuitWebviewScript(
             ? String.fromCodePoint(0x1f512)
             : String.fromCodePoint(0x1f513);
         }
+      }
+      if (relationChatBody) {
+        relationChatBody.style.display = relationChatCollapsed ? 'none' : 'flex';
+      }
+      if (relationChatToggleBtn) {
+        relationChatToggleBtn.innerHTML = relationChatCollapsed ? '&#9634;' : '&#8722;';
+        relationChatToggleBtn.title = relationChatCollapsed ? 'Expand relation chat' : 'Collapse relation chat';
+        relationChatToggleBtn.setAttribute('aria-label', relationChatCollapsed ? 'Expand relation chat' : 'Collapse relation chat');
       }
       persistUiState();
     }
@@ -1672,7 +1691,7 @@ export function buildCircuitWebviewScript(
           modeHint.textContent =
             viewMode === 'architecture'
               ? ('Architecture view: grouped by layers. Click a layer to collapse. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'))
-              : ('Runtime view: function call/data-flow with ports and animated movement. Click output port, then Context Bot to connect context (repeat to detach). Fast toggle: hold Ctrl and click a node, then Ctrl+click Context Bot. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
+              : ('Runtime view: function call/data-flow with ports and animated movement. Click output port, then Context Bot to connect context (repeat to detach). Ctrl+click nodes to set relation From/To. Use /explain, /reset, /export file.md -e|-u, and /read file.md in relation chat. Edge filter: ' + (edgeFilterMode === 'api-high' ? 'API-high only' : 'All'));
         }
       }
       if (collapseAllBtn) {
@@ -1685,20 +1704,13 @@ export function buildCircuitWebviewScript(
       persistUiState();
     }
 
-    function renderAiInsightsPanel() {
-      if (!aiInsightsEl) {
+    function updateGraphifyContextIndicator() {
+      if (!graphifyContextIndicator) {
         return;
       }
-      const blocks = [aiLastRelationExplainText, aiLastInsightsText].filter(Boolean);
-      if (!blocks.length) {
-        aiInsightsEl.style.display = 'none';
-        aiInsightsEl.textContent = '';
-        return;
-      }
-      aiInsightsEl.style.display = 'block';
-      aiInsightsEl.innerHTML = blocks
-        .map((block) => '<div class="ai-md-block">' + markdownToMiniHtml(String(block)) + '</div>')
-        .join('<hr class="ai-md-sep" />');
+      graphifyContextIndicator.textContent = 'Graphify Context: ' + (graphifyContextEnabled ? 'On' : 'Off');
+      graphifyContextIndicator.classList.toggle('on', !!graphifyContextEnabled);
+      graphifyContextIndicator.classList.toggle('off', !graphifyContextEnabled);
     }
 
     function escapeHtmlText(text) {
@@ -1786,6 +1798,115 @@ export function buildCircuitWebviewScript(
       return out.join('') || '<p>No AI output.</p>';
     }
 
+    function isChatNearBottom() {
+      if (!relationChatTimeline) {
+        return true;
+      }
+      const remaining = relationChatTimeline.scrollHeight - relationChatTimeline.scrollTop - relationChatTimeline.clientHeight;
+      return remaining < 28;
+    }
+
+    function renderRelationChatTimeline(forceStickToBottom = false) {
+      if (!relationChatTimeline) {
+        return;
+      }
+      const stickToBottom = forceStickToBottom || isChatNearBottom();
+      relationChatTimeline.textContent = '';
+
+      for (let i = 0; i < relationChatMessages.length; i++) {
+        const msg = relationChatMessages[i];
+        const card = document.createElement('div');
+        card.className = 'relation-chat-msg ' + String(msg.role || 'system');
+        if (msg.role === 'assistant' && msg.markdown) {
+          card.innerHTML = '<div class="ai-md-block">' + markdownToMiniHtml(String(msg.text || '')) + '</div>';
+        } else if (msg.kind === 'suggestions') {
+          const title = document.createElement('div');
+          title.className = 'ai-suggestions-title';
+          title.textContent = String(msg.text || 'Pending AI edge suggestions');
+          card.appendChild(title);
+
+          const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+          const suggestions = Array.isArray(msg.suggestions) ? msg.suggestions : [];
+          const maxRows = 12;
+          for (let j = 0; j < Math.min(maxRows, suggestions.length); j++) {
+            const edge = suggestions[j];
+            const edgeKey = aiSuggestionKey(edge);
+            const fromNode = byId.get(edge.from);
+            const toNode = byId.get(edge.to);
+            const conf = typeof edge.confidence === 'number' ? Math.round(edge.confidence * 100) : 50;
+            const row = document.createElement('div');
+            row.className = 'ai-suggestion-row';
+            const line = document.createElement('div');
+            line.className = 'ai-suggestion-line';
+            line.textContent =
+              (j + 1) +
+              '. ' +
+              (fromNode?.label || edge.from) +
+              ' -> ' +
+              (toNode?.label || edge.to) +
+              ' [' + String(edge.kind || 'runtime') + ', ' + conf + '%]' +
+              (edge.reason ? ': ' + edge.reason : '');
+            row.appendChild(line);
+
+            const actions = document.createElement('div');
+            actions.className = 'ai-suggestion-actions';
+            const applyBtn = document.createElement('button');
+            applyBtn.className = 'ai-suggestion-btn';
+            applyBtn.type = 'button';
+            applyBtn.textContent = 'Apply';
+            applyBtn.addEventListener('click', () => applySingleAiSuggestion(edgeKey));
+            const rejectBtn = document.createElement('button');
+            rejectBtn.className = 'ai-suggestion-btn reject';
+            rejectBtn.type = 'button';
+            rejectBtn.textContent = 'Reject';
+            rejectBtn.addEventListener('click', () => rejectSingleAiSuggestion(edgeKey));
+            actions.appendChild(applyBtn);
+            actions.appendChild(rejectBtn);
+            row.appendChild(actions);
+            card.appendChild(row);
+          }
+
+          if (suggestions.length > 12) {
+            const more = document.createElement('div');
+            more.className = 'ai-suggestion-more';
+            more.textContent = '... +' + (suggestions.length - 12) + ' more';
+            card.appendChild(more);
+          }
+        } else {
+          card.textContent = String(msg.text || '');
+        }
+        relationChatTimeline.appendChild(card);
+      }
+
+      if (!relationChatMessages.length) {
+        const empty = document.createElement('div');
+        empty.className = 'relation-chat-msg system';
+        empty.textContent = 'Relation chat is ready. Set From and To, ask a question, or click Explain.';
+        relationChatTimeline.appendChild(empty);
+      }
+
+      if (stickToBottom) {
+        relationChatTimeline.scrollTop = relationChatTimeline.scrollHeight;
+      }
+    }
+
+    function pushRelationChatMessage(role, text, options) {
+      if (!text) {
+        return;
+      }
+      relationChatMessages.push({
+        role: role || 'system',
+        text: String(text),
+        markdown: !!options?.markdown,
+        kind: options?.kind,
+        suggestions: options?.suggestions
+      });
+      if (relationChatMessages.length > 120) {
+        relationChatMessages.splice(0, relationChatMessages.length - 120);
+      }
+      renderRelationChatTimeline(true);
+    }
+
     function getNodeLabelForRelation(nodeId) {
       if (!nodeId) {
         return 'none';
@@ -1795,31 +1916,12 @@ export function buildCircuitWebviewScript(
     }
 
     function updateRelationUi() {
-      const hasFrom = !!relationFromNodeId;
-      const hasTo = !!relationToNodeId;
-      const canExplain = hasFrom && hasTo && relationFromNodeId !== relationToNodeId;
-
       if (relationStateEl) {
         relationStateEl.textContent =
           'From: ' + getNodeLabelForRelation(relationFromNodeId) +
           ' | To: ' + getNodeLabelForRelation(relationToNodeId);
       }
-      if (relationSetFromBtn) {
-        relationSetFromBtn.disabled = !selectedNodeId;
-        relationSetFromBtn.classList.toggle('active', hasFrom);
-      }
-      if (relationSetToBtn) {
-        relationSetToBtn.disabled = !selectedNodeId;
-        relationSetToBtn.classList.toggle('active', hasTo);
-      }
-      if (relationExplainBtn) {
-        relationExplainBtn.disabled = !canExplain;
-        relationExplainBtn.classList.toggle('active', canExplain);
-      }
-      if (relationResetBtn) {
-        relationResetBtn.disabled = !hasFrom && !hasTo;
-        relationResetBtn.classList.toggle('active', hasFrom || hasTo);
-      }
+      persistUiState();
     }
 
     function aiSuggestionKey(edge) {
@@ -1846,71 +1948,26 @@ export function buildCircuitWebviewScript(
     }
 
     function renderAiSuggestionQueue() {
-      if (!aiSuggestionsEl) {
-        return;
+      for (let i = relationChatMessages.length - 1; i >= 0; i--) {
+        if (relationChatMessages[i]?.kind === 'suggestions') {
+          relationChatMessages.splice(i, 1);
+        }
       }
       if (!aiSuggestedEdgesPending.length) {
-        aiSuggestionsEl.style.display = 'none';
-        aiSuggestionsEl.textContent = '';
         if (aiApplyAllBtn) aiApplyAllBtn.disabled = true;
         if (aiRejectAllBtn) aiRejectAllBtn.disabled = true;
+        renderRelationChatTimeline();
         return;
       }
-      aiSuggestionsEl.style.display = 'block';
-      aiSuggestionsEl.textContent = '';
-
-      const title = document.createElement('div');
-      title.className = 'ai-suggestions-title';
-      title.textContent = 'Pending AI edge suggestions';
-      aiSuggestionsEl.appendChild(title);
-
-      const byId = new Map(graph.nodes.map((node) => [node.id, node]));
-      const maxRows = 12;
-      for (let i = 0; i < Math.min(maxRows, aiSuggestedEdgesPending.length); i++) {
-        const edge = aiSuggestedEdgesPending[i];
-        const edgeKey = aiSuggestionKey(edge);
-        const fromNode = byId.get(edge.from);
-        const toNode = byId.get(edge.to);
-        const conf = typeof edge.confidence === 'number' ? Math.round(edge.confidence * 100) : 50;
-        const row = document.createElement('div');
-        row.className = 'ai-suggestion-row';
-        const line = document.createElement('div');
-        line.className = 'ai-suggestion-line';
-        line.textContent =
-          (i + 1) +
-          '. ' +
-          (fromNode?.label || edge.from) +
-          ' -> ' +
-          (toNode?.label || edge.to) +
-          ' [' + String(edge.kind || 'runtime') + ', ' + conf + '%]' +
-          (edge.reason ? ': ' + edge.reason : '');
-
-        const actions = document.createElement('div');
-        actions.className = 'ai-suggestion-actions';
-        const applyBtn = document.createElement('button');
-        applyBtn.className = 'ai-suggestion-btn';
-        applyBtn.type = 'button';
-        applyBtn.textContent = 'Apply';
-        applyBtn.addEventListener('click', () => applySingleAiSuggestion(edgeKey));
-        const rejectBtn = document.createElement('button');
-        rejectBtn.className = 'ai-suggestion-btn reject';
-        rejectBtn.type = 'button';
-        rejectBtn.textContent = 'Reject';
-        rejectBtn.addEventListener('click', () => rejectSingleAiSuggestion(edgeKey));
-        actions.appendChild(applyBtn);
-        actions.appendChild(rejectBtn);
-        row.appendChild(line);
-        row.appendChild(actions);
-        aiSuggestionsEl.appendChild(row);
-      }
-      if (aiSuggestedEdgesPending.length > maxRows) {
-        const more = document.createElement('div');
-        more.className = 'ai-suggestion-more';
-        more.textContent = '... +' + (aiSuggestedEdgesPending.length - maxRows) + ' more';
-        aiSuggestionsEl.appendChild(more);
-      }
+      relationChatMessages.push({
+        role: 'system',
+        text: 'Pending AI edge suggestions',
+        kind: 'suggestions',
+        suggestions: [...aiSuggestedEdgesPending]
+      });
       if (aiApplyAllBtn) aiApplyAllBtn.disabled = false;
       if (aiRejectAllBtn) aiRejectAllBtn.disabled = false;
+      renderRelationChatTimeline();
     }
 
     function dropPendingAiSuggestionByKey(edgeKey) {
@@ -1936,6 +1993,7 @@ export function buildCircuitWebviewScript(
         });
       }
       dropPendingAiSuggestionByKey(edgeKey);
+      pushRelationChatMessage('system', 'Applied suggestion: ' + String(edge.from) + ' -> ' + String(edge.to));
       renderAiSuggestionQueue();
       buildGraphScene(graph);
       if (selectedNodeId) {
@@ -1947,6 +2005,7 @@ export function buildCircuitWebviewScript(
       if (!dropPendingAiSuggestionByKey(edgeKey)) {
         return;
       }
+      pushRelationChatMessage('system', 'Rejected one AI suggestion.');
       renderAiSuggestionQueue();
       buildGraphScene(graph);
       if (selectedNodeId) {
@@ -1970,6 +2029,7 @@ export function buildCircuitWebviewScript(
         });
       }
       aiSuggestedEdgesPending = [];
+      pushRelationChatMessage('system', 'Applied all pending AI suggestions.');
       renderAiSuggestionQueue();
       buildGraphScene(graph);
       if (selectedNodeId) {
@@ -1979,6 +2039,7 @@ export function buildCircuitWebviewScript(
 
     function rejectAiSuggestions() {
       aiSuggestedEdgesPending = [];
+      pushRelationChatMessage('system', 'Rejected all pending AI suggestions.');
       renderAiSuggestionQueue();
       buildGraphScene(graph);
       if (selectedNodeId) {
@@ -1997,52 +2058,179 @@ export function buildCircuitWebviewScript(
       if (!vscode || !aiEnrichBtn) {
         return;
       }
+      pushRelationChatMessage('user', 'Generate AI insights for current graph.');
       const previous = aiEnrichBtn.textContent;
       aiEnrichBtn.textContent = 'Thinking...';
       aiEnrichBtn.disabled = true;
-      vscode.postMessage({ type: 'requestAiEnrichment' });
+      vscode.postMessage({ type: 'requestAiEnrichment', scope: currentGraphScope });
       setTimeout(() => {
         aiEnrichBtn.textContent = previous;
         aiEnrichBtn.disabled = false;
       }, 1200);
     }
 
-    function requestAiRelationExplain(fromNodeId, toNodeId) {
-      if (!vscode || !fromNodeId || !toNodeId || fromNodeId === toNodeId) {
+    function requestAiRelationExplain(options) {
+      const fromNodeId = options?.fromNodeId || undefined;
+      const toNodeId = options?.toNodeId || undefined;
+      const userPrompt = String(options?.userPrompt || '').trim();
+      const hasPair = !!fromNodeId && !!toNodeId && fromNodeId !== toNodeId;
+      if (!vscode || (!hasPair && !userPrompt)) {
         return;
       }
-      aiLastRelationExplainText = 'Analyzing relation...';
-      renderAiInsightsPanel();
-      vscode.postMessage({ type: 'requestAiRelationExplain', fromNodeId, toNodeId });
+      pushRelationChatMessage('assistant', 'Analyzing relation...', { markdown: false });
+      vscode.postMessage({
+        type: 'requestAiRelationExplain',
+        fromNodeId,
+        toNodeId,
+        userPrompt
+      });
     }
 
-    function setRelationFromSelected() {
-      if (!selectedNodeId) {
-        return;
-      }
-      relationFromNodeId = selectedNodeId;
-      updateRelationUi();
-    }
-
-    function setRelationToSelected() {
-      if (!selectedNodeId) {
-        return;
-      }
-      relationToNodeId = selectedNodeId;
-      updateRelationUi();
+    function getRelationChatExportTurns() {
+      return relationChatMessages
+        .filter((item) => item && item.kind !== 'suggestions' && String(item.text || '').trim())
+        .map((item) => ({
+          role: String(item.role || 'system'),
+          text: String(item.text || '')
+        }));
     }
 
     function explainRelationFromState() {
       if (!relationFromNodeId || !relationToNodeId || relationFromNodeId === relationToNodeId) {
-        return;
+        pushRelationChatMessage('error', 'Set From and To first with Ctrl+click on two nodes, then run /explain.');
+        return false;
       }
-      requestAiRelationExplain(relationFromNodeId, relationToNodeId);
+      pushRelationChatMessage(
+        'user',
+        'Explain relation: ' +
+          getNodeLabelForRelation(relationFromNodeId) +
+          ' -> ' +
+          getNodeLabelForRelation(relationToNodeId)
+      );
+      requestAiRelationExplain({ fromNodeId: relationFromNodeId, toNodeId: relationToNodeId });
+      return true;
     }
 
     function resetRelationState() {
       relationFromNodeId = null;
       relationToNodeId = null;
+      pushRelationChatMessage('system', 'Relation pair reset.');
       updateRelationUi();
+    }
+
+    function assignRelationFromCtrlClick(nodeId) {
+      const clickedNode = nodeMeta.get(nodeId)?.node || null;
+      selectedNodeId = nodeId;
+      if (clickedNode) {
+        setDetails(clickedNode);
+      }
+
+      if (!relationFromNodeId || (relationFromNodeId && relationToNodeId)) {
+        relationFromNodeId = nodeId;
+        relationToNodeId = null;
+        pushRelationChatMessage('system', 'Set From (Ctrl+click): ' + getNodeLabelForRelation(relationFromNodeId));
+        updateRelationUi();
+        return;
+      }
+
+      if (nodeId === relationFromNodeId) {
+        pushRelationChatMessage('system', 'From node unchanged. Ctrl+click a different node to set To.');
+        updateRelationUi();
+        return;
+      }
+
+      relationToNodeId = nodeId;
+      pushRelationChatMessage('system', 'Set To (Ctrl+click): ' + getNodeLabelForRelation(relationToNodeId));
+      updateRelationUi();
+    }
+
+    function sendRelationChatPrompt() {
+      const userPrompt = String(relationChatInput?.value || '').trim();
+      if (!userPrompt) {
+        return;
+      }
+
+      const normalized = userPrompt.toLowerCase();
+      if (normalized === '/reset') {
+        pushRelationChatMessage('user', '/reset');
+        resetRelationState();
+        if (relationChatInput) {
+          relationChatInput.value = '';
+        }
+        relationChatDraft = '';
+        updateRelationUi();
+        return;
+      }
+
+      if (normalized === '/explain') {
+        pushRelationChatMessage('user', '/explain');
+        explainRelationFromState();
+        if (relationChatInput) {
+          relationChatInput.value = '';
+        }
+        relationChatDraft = '';
+        updateRelationUi();
+        return;
+      }
+      const exportMatch = userPrompt.match(/^\\/export\\s+([^\\s]+)(?:\\s+(-e|-u))?\\s*$/i);
+      if (exportMatch) {
+        const fileName = String(exportMatch[1] || '').trim();
+        const flag = String(exportMatch[2] || '-u').toLowerCase();
+        const exportMode = flag === '-e' ? 'edit' : 'update';
+        pushRelationChatMessage('user', userPrompt);
+        if (!fileName) {
+          pushRelationChatMessage('error', 'Usage: /export <filename.md> -e|-u');
+        } else if (vscode) {
+          vscode.postMessage({
+            type: 'exportRelationChatTranscript',
+            fileName,
+            exportMode,
+            turns: getRelationChatExportTurns()
+          });
+        }
+        if (relationChatInput) {
+          relationChatInput.value = '';
+        }
+        relationChatDraft = '';
+        updateRelationUi();
+        return;
+      }
+      const readMatch = userPrompt.match(/^\\/read\\s+(.+)$/i);
+      if (readMatch) {
+        const fileName = String(readMatch[1] || '').trim();
+        pushRelationChatMessage('user', userPrompt);
+        if (!fileName) {
+          pushRelationChatMessage('error', 'Usage: /read <filename.md>');
+        } else if (vscode) {
+          vscode.postMessage({
+            type: 'readRelationChatContext',
+            fileName
+          });
+        }
+        if (relationChatInput) {
+          relationChatInput.value = '';
+        }
+        relationChatDraft = '';
+        updateRelationUi();
+        return;
+      }
+
+      pushRelationChatMessage('user', userPrompt);
+      requestAiRelationExplain({
+        fromNodeId: relationFromNodeId || undefined,
+        toNodeId: relationToNodeId || undefined,
+        userPrompt: userPrompt || undefined
+      });
+      if (relationChatInput) {
+        relationChatInput.value = '';
+      }
+      relationChatDraft = '';
+      updateRelationUi();
+    }
+
+    function toggleRelationChatCollapsed() {
+      relationChatCollapsed = !relationChatCollapsed;
+      applyHudState();
     }
 
     async function requestGraphScope(scope) {
@@ -2236,31 +2424,6 @@ export function buildCircuitWebviewScript(
         return;
       }
 
-      const handleCtrlConnectClick = (nodeId) => {
-        const prevSelectedNodeId = selectedNodeId;
-        const clickedNode = nodeMeta.get(nodeId)?.node || null;
-        selectedNodeId = nodeId;
-        if (clickedNode) {
-          setDetails(clickedNode);
-        }
-        if (nodeId === contextBotId) {
-          const sourceNodeId =
-            (ctrlConnectSourceNodeId && ctrlConnectSourceNodeId !== contextBotId)
-              ? ctrlConnectSourceNodeId
-              : (prevSelectedNodeId && prevSelectedNodeId !== contextBotId ? prevSelectedNodeId : null);
-          if (sourceNodeId) {
-            toggleContextConnectionForNode(sourceNodeId);
-          }
-          return true;
-        }
-
-        ctrlConnectSourceNodeId = nodeId;
-        if (prevSelectedNodeId === contextBotId) {
-          toggleContextConnectionForNode(nodeId);
-        }
-        return true;
-      };
-
       // If clicking a port, show tooltip (no navigation).
       raycaster.setFromCamera(pointer, camera);
       const portHits = raycaster.intersectObjects(portMeshes, false);
@@ -2294,17 +2457,9 @@ export function buildCircuitWebviewScript(
       const hit = hits[0] && hits[0].object ? hits[0].object : null;
       if (hit && hit.userData && hit.userData.nodeId) {
         const nodeId = hit.userData.nodeId;
-        const isPrimaryClick = ev.button === 0;
-
-        // Ctrl + node body arms a source node. Then a normal click on Context Bot toggles
-        // connect/disconnect from that armed source.
-        if (!isCtrlClick && isPrimaryClick && ctrlConnectSourceNodeId && nodeId === contextBotId) {
-          toggleContextConnectionForNode(ctrlConnectSourceNodeId);
-          return;
-        }
 
         if (isCtrlClick) {
-          handleCtrlConnectClick(nodeId);
+          assignRelationFromCtrlClick(nodeId);
           return;
         }
 
@@ -2315,7 +2470,6 @@ export function buildCircuitWebviewScript(
         if (connectPreview.active && nodeId !== contextBotId) {
           cancelContextConnect();
         }
-        ctrlConnectSourceNodeId = null;
         for (let i = nodeAnimations.length - 1; i >= 0; i--) {
           if (nodeAnimations[i].nodeId === nodeId) {
             nodeAnimations.splice(i, 1);
@@ -2446,10 +2600,29 @@ export function buildCircuitWebviewScript(
     aiEnrichBtn?.addEventListener('click', requestAiEnrichment);
     aiApplyAllBtn?.addEventListener('click', applyAiSuggestions);
     aiRejectAllBtn?.addEventListener('click', rejectAiSuggestions);
-    relationSetFromBtn?.addEventListener('click', setRelationFromSelected);
-    relationSetToBtn?.addEventListener('click', setRelationToSelected);
-    relationExplainBtn?.addEventListener('click', explainRelationFromState);
-    relationResetBtn?.addEventListener('click', resetRelationState);
+    relationChatToggleBtn?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      toggleRelationChatCollapsed();
+    });
+    relationChatHeader?.addEventListener('click', (ev) => {
+      if (ev.target === relationChatToggleBtn) {
+        return;
+      }
+      toggleRelationChatCollapsed();
+    });
+    relationChatInput?.addEventListener('input', () => {
+      relationChatDraft = String(relationChatInput?.value || '');
+      updateRelationUi();
+    });
+    relationChatInput?.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        sendRelationChatPrompt();
+      }
+    });
+    if (relationChatInput) {
+      relationChatInput.value = relationChatDraft;
+    }
     includeExternalBtn?.addEventListener('click', includeExternalNeighborsForSelected);
     disconnectContextBtn?.addEventListener('click', () => {
       if (!selectedNodeId || selectedNodeId === contextBotId) {
@@ -2552,10 +2725,14 @@ export function buildCircuitWebviewScript(
         buildGraphScene(graph);
         return;
       }
+      if (msg && msg.type === 'graphifyContextState') {
+        graphifyContextEnabled = !!msg.enabled;
+        updateGraphifyContextIndicator();
+        return;
+      }
       if (msg && msg.type === 'aiEnrichment') {
         if (msg.error) {
-          aiLastInsightsText = 'AI Insights failed: ' + String(msg.error);
-          renderAiInsightsPanel();
+          pushRelationChatMessage('error', 'AI Insights failed: ' + String(msg.error));
           return;
         }
         const result = msg.result;
@@ -2579,10 +2756,17 @@ export function buildCircuitWebviewScript(
         }
         const generatedAt = result?.generatedAt ? new Date(result.generatedAt).toLocaleTimeString() : '';
         const model = result?.modelLabel ? String(result.modelLabel) : 'selected model';
-        aiLastInsightsText =
+        const graphifyStatus = String(result?.graphifyEvidenceStatus || '');
+        const graphifyMessage = String(result?.graphifyEvidenceMessage || '');
+        if (graphifyStatus === 'fallback') {
+          lines.unshift('* Graphify: ' + (graphifyMessage || 'Graphify node evidence unavailable; using structural fallback.'));
+        }
+        pushRelationChatMessage(
+          'assistant',
           'AI Insights [' + model + '] ' + (generatedAt ? 'at ' + generatedAt : '') + '\\n' +
-          (lines.length ? lines.join('\\n') : 'No strong insights found.');
-        renderAiInsightsPanel();
+            (lines.length ? lines.join('\\n') : 'No strong insights found.'),
+          { markdown: true }
+        );
         const suggested = Array.isArray(result?.suggestedEdges) ? result.suggestedEdges : [];
         mergeAiSuggestions(suggested);
         renderAiSuggestionQueue();
@@ -2592,21 +2776,52 @@ export function buildCircuitWebviewScript(
         }
         return;
       }
+      if (msg && msg.type === 'relationChatExported') {
+        if (msg.error) {
+          pushRelationChatMessage('error', 'Export failed: ' + String(msg.error));
+          return;
+        }
+        if (msg.skipped) {
+          pushRelationChatMessage('system', String(msg.message || 'No new updates to export.'));
+          return;
+        }
+        const createdLabel = msg.created ? 'created' : 'updated';
+        const modeLabel = msg.exportMode === 'edit' ? 'incremental (-e)' : 'rewrite (-u)';
+        const turnsLabel = typeof msg.exportedTurns === 'number' ? ' | turns: ' + msg.exportedTurns : '';
+        pushRelationChatMessage('system', 'Chat transcript ' + createdLabel + ' [' + modeLabel + ']: ' + String(msg.path || msg.fileName || 'markdown file') + turnsLabel);
+        return;
+      }
+      if (msg && msg.type === 'relationChatContextRead') {
+        if (msg.error) {
+          pushRelationChatMessage('error', 'Read failed: ' + String(msg.error));
+          return;
+        }
+        const size = typeof msg.contextText === 'string' ? msg.contextText.length : 0;
+        pushRelationChatMessage('system', 'Loaded extra context from ' + String(msg.path || msg.fileName || 'markdown file') + ' (' + size + ' chars).');
+        return;
+      }
       if (msg && msg.type === 'aiRelationExplain') {
         relationFromNodeId = msg.fromNodeId || relationFromNodeId;
         relationToNodeId = msg.toNodeId || relationToNodeId;
         if (msg.error) {
-          aiLastRelationExplainText = 'AI Relation Explain failed: ' + String(msg.error);
-          renderAiInsightsPanel();
+          pushRelationChatMessage('error', 'AI Relation Explain failed: ' + String(msg.error));
           updateRelationUi();
           return;
         }
-        const fromNode = graph.nodes.find((node) => node.id === msg.fromNodeId);
-        const toNode = graph.nodes.find((node) => node.id === msg.toNodeId);
-        const pairLabel = (fromNode?.label || msg.fromNodeId) + ' -> ' + (toNode?.label || msg.toNodeId);
-        aiLastRelationExplainText =
-          'AI Relation Explain [' + pairLabel + ']\\n' + String(msg.text || 'No relation explanation generated.');
-        renderAiInsightsPanel();
+        const fromNodeId = msg.fromNodeId || undefined;
+        const toNodeId = msg.toNodeId || undefined;
+        if (fromNodeId && toNodeId) {
+          const fromNode = graph.nodes.find((node) => node.id === fromNodeId);
+          const toNode = graph.nodes.find((node) => node.id === toNodeId);
+          const pairLabel = (fromNode?.label || fromNodeId) + ' -> ' + (toNode?.label || toNodeId);
+          pushRelationChatMessage(
+            'assistant',
+            'AI Relation Explain [' + pairLabel + ']\\n' + String(msg.text || 'No relation explanation generated.'),
+            { markdown: true }
+          );
+        } else {
+          pushRelationChatMessage('assistant', String(msg.text || 'No relation explanation generated.'), { markdown: true });
+        }
         updateRelationUi();
       }
     });
@@ -2759,7 +2974,14 @@ export function buildCircuitWebviewScript(
         const explainRelationBtn = document.createElement('button');
         explainRelationBtn.textContent = 'Explain relation to selected';
         explainRelationBtn.addEventListener('click', () => {
-          requestAiRelationExplain(selectedNodeId, nodeId);
+          pushRelationChatMessage(
+            'user',
+            'Explain relation: ' +
+              getNodeLabelForRelation(selectedNodeId) +
+              ' -> ' +
+              getNodeLabelForRelation(nodeId)
+          );
+          requestAiRelationExplain({ fromNodeId: selectedNodeId, toNodeId: nodeId });
           hideNodeMenu();
         });
         nodeMenu.appendChild(explainRelationBtn);
@@ -2924,6 +3146,7 @@ export function buildCircuitWebviewScript(
     updateModeUi();
     updateRelationUi();
     renderAiSuggestionQueue();
+    updateGraphifyContextIndicator();
     applySceneThemeByMode();
     if (skeletonRootNodeId) {
       viewMode = 'runtime';

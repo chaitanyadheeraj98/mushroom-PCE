@@ -1,53 +1,76 @@
 ﻿import { ResponseMode } from '../../shared/types/appTypes';
 
-export function buildPrompt(languageId: string, code: string, responseMode: ResponseMode): string {
-	const developerPrompt = `
-You are a friendly programming teacher for complete beginners.
+type BuildPromptOptions = {
+	graphContext?: string;
+};
 
-Return Markdown only. Keep it clean, simple, and easy to read.
+type NodeGraphifyEvidenceResult = import('../../shared/types/circuitTypes').NodeGraphifyEvidenceResult;
+
+export function buildPrompt(
+	languageId: string,
+	code: string,
+	responseMode: ResponseMode,
+	options?: BuildPromptOptions
+): string {
+	const graphContextBlock = options?.graphContext?.trim()
+		? `
+Graphify Project Context (authoritative high-level architecture summary):
+\`\`\`markdown
+${options.graphContext.trim()}
+\`\`\`
+
+Use this Graphify context to improve architecture-level accuracy and navigation decisions.
+When it conflicts with uncertain assumptions, prefer the Graphify context.
+If "Graphify Smart Query Context (CLI)" or "Graphify Path Evidence (CLI)" is present:
+- Treat those node/edge/path outputs as concrete evidence.
+- In each high/medium finding, add one explicit graph citation line:
+  - Graph Evidence: <query/path summary with node/edge identifiers from context>
+  - If no relevant graph evidence exists for a finding, say: Graph Evidence: none found in provided graph context.
+`
+		: '';
+	const developerPrompt = `
+You are an expert engineering code reviewer.
+
+Primary goals (in order):
+1. Correctness
+2. Security
+3. Maintainability
+4. Performance
+5. Testing completeness
+
+Return Markdown only.
+Do not use markdown tables.
+Use backticks for code identifiers.
+When referencing a symbol, wrap only the bare identifier in backticks (for example, \`myFunction\`).
+Be specific and evidence-based. Avoid generic advice.
+Prioritize concrete, high-impact findings over broad summaries.
 
 Required structure (use exactly these headings):
-# Quick Summary
-# Logic and Flow
-# Functions
-# Data Structures
-# Program Structure
-# Debugging and Quality
-# Real-World Reading Path
-# Imports and External Packages
-# Example Input and Output
-# Important Lines Explained
-# Step-by-Step Flow
-# Beginner Story
-# Key Takeaways
+# Review Summary
+# System Role and Linked Impact
+# Findings
+# Open Questions
+# Suggested Next Steps
 
-Formatting rules:
-- Use short bullet points.
-- Do not use markdown tables.
-- Use backticks for code identifiers.
-- When referencing a symbol, wrap only the bare identifier in backticks (for example, \`myFunction\`, not \`myFunction(arg)\`).
-- If a section has no items, write: - None
-- Keep explanations simple, visual, and beginner-friendly.
-- Start with what the code is trying to achieve in 1-2 sentences.
-- Explain every new technical term in one short line.
-- Explain not only what each part does, but why it exists.
-- Use a beginner tone: "assume I have never seen this before."
-- Explain what each import/package is used for in plain language.
-- Explain what would happen without each important import/package.
-- In "Logic and Flow", explicitly cover condition checks, loops, and boolean/comparison usage.
-- In "Functions", explain input -> process -> output for each important function.
-- In "Data Structures", show simple example values and how data changes over time.
-- In "Program Structure", explain where execution starts and how parts connect.
-- In "Debugging and Quality", include 2-3 common beginner mistakes and how to fix them.
-- In "Real-World Reading Path", explain how data flows through variables, arrays/objects, and function calls.
-- In "Example Input and Output", provide concrete sample input and expected output.
-- In "Important Lines Explained", explain key lines only (not every single line).
-- In "Step-by-Step Flow", simulate execution with a small sample and show state changes.
-- In "Beginner Story", use one short real-life analogy (recipe/shopping/etc.) and keep it memorable.
-- In "Deeper Concepts", mention async/promises/recursion/complexity only if actually present.
-- In "Deeper Concepts", keep each concept to 1-2 lines max.
-- Avoid jargon unless you also define it in one sentence.
-- Keep each section concise to avoid overload (roughly 3-7 bullets per section when possible).
+Review behavior:
+- In "Review Summary", provide 2-4 bullets on overall quality and risk.
+- In "System Role and Linked Impact", classify the active file as exactly one: \`big_machine\`, \`connector\`, or \`small_cog\`.
+- In "System Role and Linked Impact", include:
+  - Role decision + short why
+  - Top linked files (if provided)
+  - Whether linked dependencies appear to be working as intended
+  - Fallback note when linked graph context is unavailable
+- In "Findings", list issues ordered by severity: blocker, high, medium, low.
+- For each finding include:
+  - Severity: blocker | high | medium | low
+  - Evidence: specific function, condition, or code behavior (and line reference if visible)
+  - Why it matters
+  - Suggested fix
+- Focus on real risks: auth, input validation, unsafe assumptions, data integrity, error handling, race conditions, API contract breaks, and missing critical-path tests.
+- If no meaningful issues are found, explicitly say "No major findings." and include residual risks or testing gaps.
+- In "Open Questions", ask only clarification questions that materially affect correctness/security decisions.
+- In "Suggested Next Steps", provide a short, prioritized action list.
+${graphContextBlock}
 
 Code (${languageId}):
 \`\`\`${languageId}
@@ -160,7 +183,50 @@ ${code}
 \`\`\`
 `;
 
-	return responseMode === 'list' ? listPrompt : developerPrompt;
+	const definitionPrompt = `
+You are a beginner-friendly code explainer.
+
+Goal:
+- Explain what this file does in simple language.
+- Explain how this file connects to other files and whether those connections seem to behave as intended.
+- Help a beginner understand both local logic and system context.
+
+Return Markdown only.
+Do not use markdown tables.
+Use backticks for code identifiers.
+Keep explanations clear and practical.
+
+Required structure (use exactly these headings):
+# File Purpose
+# Core Flow
+# Functions and Responsibilities
+# Connected Files and Dependencies
+# Is This File a Core Engine or a Supporting Cog?
+# Behavior Check in System Context
+# Risks or Red Flags
+# Quick Glossary
+# Key Takeaways
+
+Definition mode behavior:
+- Keep language beginner-friendly but technically accurate.
+- In "Connected Files and Dependencies", cite linked files and relationships when graph context is available.
+- In "Is This File a Core Engine or a Supporting Cog?", classify as one of: \`big_machine\`, \`connector\`, \`small_cog\`, with a short reason.
+- In "Behavior Check in System Context", explain whether this file appears to be working as intended relative to connected files.
+- If graph context is missing, explicitly say linked-file inference is limited and continue with current-file analysis.
+- Include concrete examples from code where possible.
+${graphContextBlock}
+
+Code (${languageId}):
+\`\`\`${languageId}
+${code}
+\`\`\`
+`;
+
+	if (responseMode === 'list') {
+		return listPrompt;
+	}
+
+	return responseMode === 'definition' ? definitionPrompt : developerPrompt;
 }
 
 export function buildListFormatPolishPrompt(languageId: string, canonicalListOutput: string): string {
@@ -205,11 +271,13 @@ type NodePromptRequest = {
 	snippet: string;
 	developerAnalysis?: string;
 	question: string;
+	extraContextText?: string;
 	history: Array<{ role: 'user' | 'assistant'; text: string }>;
 	connectionContext: {
 		incoming: string[];
 		outgoing: string[];
 	};
+	graphifyEvidence?: NodeGraphifyEvidenceResult;
 };
 
 export function buildNodeDetailsPrompt(request: NodePromptRequest): string {
@@ -260,6 +328,12 @@ ${request.connectionContext.outgoing.length ? request.connectionContext.outgoing
 Recent Chat:
 ${historyText || '(no previous history)'}
 
+Graphify Node Evidence:
+${formatNodeGraphifyEvidence(request.graphifyEvidence)}
+
+Extra Context (/read):
+${request.extraContextText?.trim() ? request.extraContextText.trim() : '(none loaded)'}
+
 User Question:
 ${request.question}
 `;
@@ -294,9 +368,39 @@ ${request.connectionContext.outgoing.length ? request.connectionContext.outgoing
 Recent Chat:
 ${historyText || '(no previous history)'}
 
+Graphify Node Evidence:
+${formatNodeGraphifyEvidence(request.graphifyEvidence)}
+
+Extra Context (/read):
+${request.extraContextText?.trim() ? request.extraContextText.trim() : '(none loaded)'}
+
 User Question:
 ${request.question}
 `;
+}
+
+function formatNodeGraphifyEvidence(evidence?: NodeGraphifyEvidenceResult): string {
+	if (!evidence) {
+		return '(not requested)';
+	}
+	if (evidence.status === 'fallback') {
+		return `Graphify node evidence unavailable; using structural fallback.\nReason: ${evidence.fallbackReason || 'No query/path evidence available.'}`;
+	}
+	const incoming = evidence.incoming.slice(0, 5).map((item) => `  - ${item.node}`).join('\n') || '  - none';
+	const outgoing = evidence.outgoing.slice(0, 5).map((item) => `  - ${item.node}`).join('\n') || '  - none';
+	const paths = evidence.paths.slice(0, 3).map((item) => `  - ${item.from} -> ${item.to}: ${item.summary}`).join('\n') || '  - none';
+	const files = evidence.topLinkedFiles.slice(0, 3).map((item) => `  - ${item.path} (score=${item.score})`).join('\n') || '  - none';
+	return [
+		evidence.summary || 'Node-scoped evidence loaded.',
+		'Incoming:',
+		incoming,
+		'Outgoing:',
+		outgoing,
+		'Paths:',
+		paths,
+		'Top Linked Files:',
+		files
+	].join('\n');
 }
 
 

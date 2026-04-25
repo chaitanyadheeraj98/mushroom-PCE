@@ -1,7 +1,12 @@
 ﻿import * as vscode from 'vscode';
 
-import { CircuitEdge, CircuitGraph, CircuitNode } from '../../shared/types/circuitTypes';
+import { CircuitEdge, CircuitGraph, CircuitNode, NodeGraphifyEvidenceResult } from '../../shared/types/circuitTypes';
 import { NormalizedDocumentSymbol, getNormalizedDocumentSymbols } from '../../services/symbols/documentSymbols';
+import {
+	buildChatTranscriptMarkdown,
+	exportChatMarkdownFile,
+	readChatMarkdownFile
+} from '../../services/chat/chatSessionMarkdown';
 
 const FILE_SNIPPET_MAX_LINES = 400;
 const FILE_SNIPPET_MAX_CHARS = 24000;
@@ -16,11 +21,13 @@ export type NodeChatRequest = {
 	snippet: string;
 	developerAnalysis?: string;
 	question: string;
+	extraContextText?: string;
 	history: NodeChatTurn[];
 	connectionContext: {
 		incoming: string[];
 		outgoing: string[];
 	};
+	graphifyEvidence?: NodeGraphifyEvidenceResult;
 };
 
 export class CircuitDetailsPanel {
@@ -34,20 +41,26 @@ export class CircuitDetailsPanel {
 	private currentSnippet = '';
 	private chatTurns: NodeChatTurn[] = [];
 	private asking = false;
+	private graphifyContextEnabled = false;
+	private extraContextText = '';
+	private readonly exportCursorByFile = new Map<string, number>();
 
 	static async createOrShow(
 		node: CircuitNode | undefined,
 		graph: CircuitGraph,
-		onAsk?: (request: NodeChatRequest) => Promise<string>
+		onAsk?: (request: NodeChatRequest) => Promise<string>,
+		options?: { graphifyContextEnabled?: boolean }
 	): Promise<CircuitDetailsPanel> {
 		const currentPanel = CircuitDetailsPanel.currentPanel;
 		if (currentPanel) {
 			// Treat Node Details like an inspector: update content without moving the user's chosen editor group.
 			currentPanel.currentGraph = graph;
 			currentPanel.onAsk = onAsk;
+			currentPanel.graphifyContextEnabled = Boolean(options?.graphifyContextEnabled);
 			if (node) {
 				await currentPanel.setNode(node);
 			}
+			currentPanel.render();
 			return currentPanel;
 		}
 
@@ -57,8 +70,17 @@ export class CircuitDetailsPanel {
 		});
 
 		CircuitDetailsPanel.currentPanel = new CircuitDetailsPanel(panel, graph, onAsk);
+		CircuitDetailsPanel.currentPanel.graphifyContextEnabled = Boolean(options?.graphifyContextEnabled);
 		await CircuitDetailsPanel.currentPanel.setNode(node);
 		return CircuitDetailsPanel.currentPanel;
+	}
+
+	static setGraphifyContextEnabled(enabled: boolean): void {
+		if (!CircuitDetailsPanel.currentPanel) {
+			return;
+		}
+		CircuitDetailsPanel.currentPanel.graphifyContextEnabled = enabled;
+		CircuitDetailsPanel.currentPanel.render();
 	}
 
 	static async syncGraph(graph: CircuitGraph): Promise<void> {
@@ -108,6 +130,8 @@ export class CircuitDetailsPanel {
 		}
 		if (nodeChanged) {
 			this.chatTurns = [];
+			this.extraContextText = '';
+			this.exportCursorByFile.clear();
 		}
 		this.render();
 	}
@@ -156,6 +180,18 @@ export class CircuitDetailsPanel {
 		if (!question) {
 			return;
 		}
+		const exportMatch = question.match(/^\/export\s+([^\s]+)(?:\s+(-e|-u))?\s*$/i);
+		if (exportMatch) {
+			const fileName = String(exportMatch[1] || '').trim();
+			const flag = String(exportMatch[2] || '-u').toLowerCase();
+			await this.handleExportCommand(fileName, flag === '-e' ? 'edit' : 'update');
+			return;
+		}
+		const readMatch = question.match(/^\/read\s+(.+)$/i);
+		if (readMatch) {
+			await this.handleReadCommand(String(readMatch[1] || '').trim());
+			return;
+		}
 
 		this.chatTurns.push({ role: 'user', text: question });
 		this.asking = true;
@@ -171,6 +207,7 @@ export class CircuitDetailsPanel {
 				node: this.currentNode,
 				snippet: this.currentSnippet,
 				question,
+				extraContextText: this.extraContextText,
 				history: [...this.chatTurns],
 				connectionContext: this.getConnectionContext(this.currentNode)
 			});
@@ -183,10 +220,101 @@ export class CircuitDetailsPanel {
 		}
 	}
 
+	private async handleExportCommand(fileName: string, exportMode: 'edit' | 'update'): Promise<void> {
+		if (!fileName) {
+			this.chatTurns.push({ role: 'assistant', text: 'Usage: /export <filename.md> -e|-u' });
+			this.render();
+			return;
+		}
+		this.asking = true;
+		this.render();
+		try {
+			const fileKey = fileName.toLowerCase();
+			const previousCursorRaw = this.exportCursorByFile.get(fileKey) ?? 0;
+			const previousCursor = previousCursorRaw > this.chatTurns.length ? 0 : previousCursorRaw;
+			const exportTurns =
+				exportMode === 'edit'
+					? this.chatTurns.slice(Math.max(0, previousCursor))
+					: this.chatTurns;
+			if (exportMode === 'edit' && !exportTurns.length) {
+				this.chatTurns.push({
+					role: 'assistant',
+					text: 'No new chat turns since last /export ... -e for this file.'
+				});
+				return;
+			}
+			const markdown = buildChatTranscriptMarkdown(
+				`Node Details Chat - ${this.currentNode?.label || 'node'}`,
+				exportTurns
+			);
+			const result = await exportChatMarkdownFile({
+				fileName,
+				markdown,
+				mode: exportMode,
+				preferredWorkspaceUri: this.getPreferredWorkspaceUri()
+			});
+			this.exportCursorByFile.set(fileKey, this.chatTurns.length);
+			this.chatTurns.push({
+				role: 'assistant',
+				text: `Transcript ${result.created ? 'created' : 'updated'} [${exportMode === 'edit' ? 'incremental -e' : 'rewrite -u'}]: ${result.relativePath} | turns: ${exportTurns.length}`
+			});
+		} catch (error: any) {
+			this.chatTurns.push({ role: 'assistant', text: `Export failed: ${error?.message ?? String(error)}` });
+		} finally {
+			this.asking = false;
+			this.render();
+		}
+	}
+
+	private async handleReadCommand(fileName: string): Promise<void> {
+		if (!fileName) {
+			this.chatTurns.push({ role: 'assistant', text: 'Usage: /read <filename.md>' });
+			this.render();
+			return;
+		}
+		this.asking = true;
+		this.render();
+		try {
+			const result = await readChatMarkdownFile({
+				fileName,
+				preferredWorkspaceUri: this.getPreferredWorkspaceUri()
+			});
+			this.extraContextText = result.content;
+			this.chatTurns.push({
+				role: 'assistant',
+				text: `Loaded extra context from ${result.relativePath} (${result.content.length} chars).`
+			});
+		} catch (error: any) {
+			this.chatTurns.push({ role: 'assistant', text: `Read failed: ${error?.message ?? String(error)}` });
+		} finally {
+			this.asking = false;
+			this.render();
+		}
+	}
+
+	private getPreferredWorkspaceUri(): vscode.Uri | undefined {
+		try {
+			if (this.currentNode?.uri) {
+				return vscode.Uri.parse(this.currentNode.uri);
+			}
+		} catch {
+			// Best effort only.
+		}
+		const fallbackNode = this.currentGraph?.nodes.find((node) => Boolean(node.uri));
+		if (!fallbackNode?.uri) {
+			return undefined;
+		}
+		try {
+			return vscode.Uri.parse(fallbackNode.uri);
+		} catch {
+			return undefined;
+		}
+	}
+
 	private render(): void {
 		this.panel.webview.html = this.currentNode
-			? renderHtml(this.currentNode, this.currentSnippet, this.chatTurns, this.asking)
-			: renderEmptyHtml();
+			? renderHtml(this.currentNode, this.currentSnippet, this.chatTurns, this.asking, this.graphifyContextEnabled)
+			: renderEmptyHtml(this.graphifyContextEnabled);
 	}
 
 	private getConnectionContext(node: CircuitNode): { incoming: string[]; outgoing: string[] } {
@@ -455,12 +583,20 @@ function scoreSymbolMatch(
 	return score;
 }
 
-function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[], asking: boolean): string {
+function renderHtml(
+	node: CircuitNode,
+	snippet: string,
+	chatTurns: NodeChatTurn[],
+	asking: boolean,
+	graphifyContextEnabled: boolean
+): string {
 	const nonce = getNonce();
 	const esc = (s: string) =>
 		s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 	const title = `${node.type}: ${node.label}`;
+	const graphifyStatusText = graphifyContextEnabled ? 'Graphify Context: On' : 'Graphify Context: Off';
+	const graphifyStatusClass = graphifyContextEnabled ? 'on' : 'off';
 	const meta = [
 		`type: ${node.type}`,
 		node.layer ? `layer: ${node.layer}` : '',
@@ -494,7 +630,29 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
   <style>
     :root { --bg:#0b1020; --panel:#0f172a; --text:#e2e8f0; --muted:#9fb0cc; --border:#21304d; --code:#0b1225; --accent:#22c55e; }
     body { margin:0; padding:16px; background: radial-gradient(circle at top right, #1e293b, var(--bg) 55%); color:var(--text); font-family: Segoe UI, Tahoma, sans-serif; }
+    .header-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom: 6px; }
     h1 { font-size:16px; margin:0 0 6px; }
+    .graphify-pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid rgba(84, 117, 171, 0.75);
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+    .graphify-pill.on {
+      background: rgba(22, 163, 74, 0.24);
+      border-color: rgba(34, 197, 94, 0.88);
+      color: #dcfce7;
+    }
+    .graphify-pill.off {
+      background: rgba(30, 41, 59, 0.4);
+      border-color: rgba(84, 117, 171, 0.72);
+      color: #cbd5e1;
+    }
     .meta { color: var(--muted); font-size:12px; margin-bottom: 12px; }
     pre { background: var(--code); border:1px solid var(--border); border-radius:10px; padding:12px; overflow:auto; max-height: 260px; }
     code { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
@@ -577,12 +735,13 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
     .chat-empty { color: var(--muted); font-size: 12px; }
     .ask-row { display: flex; gap: 8px; padding: 10px; border-top:1px solid var(--border); }
     textarea { flex:1; resize: vertical; min-height: 56px; max-height: 120px; border-radius: 8px; border:1px solid var(--border); background: #0b1225; color: var(--text); padding: 8px; font-family: Segoe UI, Tahoma, sans-serif; font-size: 13px; }
-    .ask-btn { border:none; border-radius: 8px; padding: 10px 12px; background: #16a34a; color: #fff; font-weight: 600; cursor: pointer; align-self: flex-end; }
-    .ask-btn:disabled { background: #334155; cursor: default; }
   </style>
 </head>
 <body>
-  <h1>${esc(title)}</h1>
+  <div class="header-row">
+    <h1>${esc(title)}</h1>
+    <div class="graphify-pill ${graphifyStatusClass}">${esc(graphifyStatusText)}</div>
+  </div>
   <div class="meta">${esc(meta)}</div>
   <div class="copy-wrap">
     <button class="copy-btn" id="copySnippetBtn" type="button" title="Copy snippet" aria-label="Copy snippet">⧉</button>
@@ -592,13 +751,11 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
     <div class="chat-head">Node Chat (uses selected model from Mushroom PCE)</div>
     <div id="chatLog" class="chat-log">${chatHtml}</div>
     <div class="ask-row">
-      <textarea id="question" placeholder="Ask about this node's logic, bugs, edge cases, improvements..." ${asking ? 'disabled' : ''}></textarea>
-      <button id="askBtn" class="ask-btn" ${asking ? 'disabled' : ''}>${asking ? 'Thinking...' : 'Ask'}</button>
+      <textarea id="question" placeholder="Ask about this node... Commands: /read notes.md, /export notes.md -e|-u. (Enter to send, Shift+Enter for new line)" ${asking ? 'disabled' : ''}></textarea>
     </div>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const askBtn = document.getElementById('askBtn');
     const question = document.getElementById('question');
     const chatLog = document.getElementById('chatLog');
     const copySnippetBtn = document.getElementById('copySnippetBtn');
@@ -690,9 +847,8 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
       if (!text) return;
       vscode.postMessage({ type: 'ask', question: text });
     };
-    askBtn?.addEventListener('click', submit);
     question?.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         submit();
       }
@@ -707,8 +863,10 @@ function renderHtml(node: CircuitNode, snippet: string, chatTurns: NodeChatTurn[
 </html>`;
 }
 
-function renderEmptyHtml(): string {
+function renderEmptyHtml(graphifyContextEnabled: boolean): string {
 	const nonce = getNonce();
+	const graphifyStatusText = graphifyContextEnabled ? 'Graphify Context: On' : 'Graphify Context: Off';
+	const graphifyStatusClass = graphifyContextEnabled ? 'on' : 'off';
 	return `<!doctype html>
 <html>
 <head>
@@ -738,11 +896,42 @@ function renderEmptyHtml(): string {
       font-weight: 700;
       margin-bottom: 6px;
     }
+    .header-row {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom: 6px;
+    }
+    .graphify-pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid rgba(84, 117, 171, 0.75);
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+    .graphify-pill.on {
+      background: rgba(22, 163, 74, 0.24);
+      border-color: rgba(34, 197, 94, 0.88);
+      color: #dcfce7;
+    }
+    .graphify-pill.off {
+      background: rgba(30, 41, 59, 0.4);
+      border-color: rgba(84, 117, 171, 0.72);
+      color: #cbd5e1;
+    }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="title">Node Details</div>
+    <div class="header-row">
+      <div class="title">Node Details</div>
+      <div class="graphify-pill ${graphifyStatusClass}">${graphifyStatusText}</div>
+    </div>
     <div>Select a valid node in Circuit Mode to view its code snippet and chat context.</div>
   </div>
 </body>

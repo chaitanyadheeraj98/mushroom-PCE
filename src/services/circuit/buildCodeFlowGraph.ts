@@ -14,6 +14,10 @@ type FlowBlock = {
 };
 
 export function buildCodeFlowGraph(document: vscode.TextDocument): CircuitGraph {
+	if (isDeclarationFileUri(document.uri)) {
+		return buildDeclarationCodeFlowHint(document);
+	}
+
 	const code = document.getText();
 	const sourceFile = ts.createSourceFile(
 		document.fileName || 'file.ts',
@@ -189,5 +193,46 @@ function inferScriptKind(languageId: string): ts.ScriptKind {
 		default:
 			return ts.ScriptKind.TS;
 	}
+}
+
+function isDeclarationFileUri(uri: vscode.Uri): boolean {
+	return /\.d\.ts$/i.test(uri.fsPath.replace(/\\/g, '/').toLowerCase());
+}
+
+function buildDeclarationCodeFlowHint(document: vscode.TextDocument): CircuitGraph {
+	const uri = document.uri.toString();
+	const rootId = `codeflow:decl:${uri}`;
+	const hintId = `codeflow:decl:hint:${uri}`;
+	return {
+		nodes: [
+			{
+				id: rootId,
+				type: 'module',
+				layer: 'utility',
+				groupId: 'group:codeflow',
+				label: document.fileName.split(/[\\/]/).pop() || '.d.ts file',
+				uri,
+				detail: 'TypeScript declaration file (.d.ts)'
+			},
+			{
+				id: hintId,
+				type: 'utility',
+				layer: 'utility',
+				groupId: 'group:codeflow',
+				label: 'CodeFlow ignored for declaration file',
+				uri,
+				detail: 'CodeFlow focuses on executable logic, not TypeScript declarations.'
+			}
+		],
+		edges: [
+			{
+				id: 'e:0',
+				kind: 'runtime',
+				from: rootId,
+				to: hintId,
+				label: 'hint'
+			}
+		]
+	};
 }
 

@@ -4,8 +4,10 @@ import { CircuitDetailsPanel, NodeChatRequest } from '../controllers/circuit/Cir
 import { buildCodeFlowGraph } from '../services/circuit/buildCodeFlowGraph';
 import { buildCircuitGraphHybrid } from '../services/circuit/buildGraphHybrid';
 import { buildProjectArchitectureGraph } from '../services/circuit/buildProjectArchitectureGraph';
+import { BlueprintPanel } from '../controllers/blueprint/BlueprintPanelController';
 import { CircuitPanel } from '../controllers/circuit/CircuitPanelController';
 import { buildGlobalSkeletonGraph } from '../services/circuit/buildSkeletonGraph';
+import { enrichCircuitGraphWithGraphifyContext } from '../services/circuit/graphifyCircuitContext';
 import { MushroomPanel } from '../controllers/mushroom/MushroomPanelController';
 import { ResponseMode } from '../shared/types/appTypes';
 import { CircuitAiEnrichmentResult, CircuitGraph } from '../shared/types/circuitTypes';
@@ -23,13 +25,22 @@ type RegisterCommandsDeps = {
 	getSelectedResponseMode: () => ResponseMode;
 	setSelectedResponseMode: (mode: ResponseMode) => void;
 	applyModeStateToPanel: (panel: MushroomPanel) => void;
+	getGraphifyContextEnabled: () => boolean;
+	setGraphifyContextEnabled: (enabled: boolean) => void;
+	applyGraphifyStateToPanel: (panel: MushroomPanel) => void;
 	applyModelStateToPanel: (panel: MushroomPanel) => void;
 	applySymbolStateToPanel: (panel: MushroomPanel, document: vscode.TextDocument) => Promise<void>;
 	tryRestoreCachedAnalysis: (panel: MushroomPanel) => Promise<boolean>;
 	runAnalysis: (panel: MushroomPanel) => Promise<void>;
 	askNodeQuestion: (request: NodeChatRequest) => Promise<string>;
-	requestCircuitAiEnrichment: (graph: CircuitGraph) => Promise<CircuitAiEnrichmentResult | undefined>;
-	requestCircuitRelationExplain: (graph: CircuitGraph, fromNodeId: string, toNodeId: string) => Promise<string | undefined>;
+	requestCircuitAiEnrichment: (
+		graph: CircuitGraph,
+		scope?: 'current-file' | 'full-architecture' | 'codeflow'
+	) => Promise<CircuitAiEnrichmentResult | undefined>;
+	requestCircuitRelationExplain: (
+		graph: CircuitGraph,
+		options: { fromNodeId?: string; toNodeId?: string; userPrompt?: string; extraContextText?: string }
+	) => Promise<string | undefined>;
 	openBlueprintPanel: () => Promise<void>;
 };
 
@@ -53,6 +64,7 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		panel.setExplanation('Click Analyze to explain the active file.');
 		panel.setLanguageWarning(undefined);
 		deps.applyModeStateToPanel(panel);
+		deps.applyGraphifyStateToPanel(panel);
 
 		const currentDoc = deps.getCurrentDocument();
 		if (currentDoc) {
@@ -152,6 +164,37 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		deps.output.appendLine('response mode selected: developer');
 	});
 
+	const setDefinitionModeCommand = vscode.commands.registerCommand('mushroom-pce.setDefinitionMode', async () => {
+		deps.setSelectedResponseMode('definition');
+		const panel = MushroomPanel.getCurrentPanel();
+		if (panel && !panel.isDisposed()) {
+			deps.applyModeStateToPanel(panel);
+			await deps.tryRestoreCachedAnalysis(panel);
+		}
+		vscode.window.showInformationMessage('Mushroom PCE mode set to Definition Mode');
+		deps.output.appendLine('response mode selected: definition');
+	});
+
+	const toggleGraphifyContextCommand = vscode.commands.registerCommand(
+		'mushroom-pce.toggleGraphifyContext',
+		async () => {
+			const next = !deps.getGraphifyContextEnabled();
+			deps.setGraphifyContextEnabled(next);
+			const panel = MushroomPanel.getCurrentPanel();
+			if (panel && !panel.isDisposed()) {
+				deps.applyGraphifyStateToPanel(panel);
+				await deps.tryRestoreCachedAnalysis(panel);
+			}
+			CircuitPanel.setGraphifyContextEnabled(next);
+			CircuitDetailsPanel.setGraphifyContextEnabled(next);
+			BlueprintPanel.setGraphifyContextEnabled(next);
+			vscode.window.showInformationMessage(
+				`Mushroom PCE Graphify context ${next ? 'enabled' : 'disabled'}.`
+			);
+			deps.output.appendLine(`graphify context toggle: ${next ? 'on' : 'off'}`);
+		}
+	);
+
 	const openCircuitCommand = vscode.commands.registerCommand('mushroom-pce.openCircuit', async () => {
 		const doc = deps.getCurrentDocument();
 		if (!doc) {
@@ -159,7 +202,14 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 			return;
 		}
 
-		const graph = await buildCircuitGraphHybrid(doc);
+		const baseGraph = await buildCircuitGraphHybrid(doc);
+		const graph = deps.getGraphifyContextEnabled()
+			? await enrichCircuitGraphWithGraphifyContext(baseGraph, {
+				scope: 'current-file',
+				document: doc,
+				output: deps.output
+			})
+			: baseGraph;
 		CircuitPanel.createOrShow(
 			deps.extensionUri,
 			graph,
@@ -167,33 +217,46 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 				if (node?.uri && typeof node.line === 'number' && typeof node.character === 'number') {
 					await vscode.commands.executeCommand('mushroom-pce.goToFunction', node.uri, node.line, node.character);
 				}
-				await CircuitDetailsPanel.createOrShow(node, currentGraph, deps.askNodeQuestion);
+				await CircuitDetailsPanel.createOrShow(node, currentGraph, deps.askNodeQuestion, {
+					graphifyContextEnabled: deps.getGraphifyContextEnabled()
+				});
 			},
 			async (node, currentGraph) => buildGlobalSkeletonGraph(node, currentGraph, 3),
 			async (scope, _currentGraph, options) => {
-				if (scope === 'full-architecture') {
-					return buildProjectArchitectureGraph(deps.getCurrentDocument(), {
-						dependencyMode: options?.dependencyMode === 'imports-calls' ? 'imports-calls' : 'imports'
-					});
-				}
-				if (scope === 'codeflow') {
-					const currentDoc = deps.getCurrentDocument();
-					if (!currentDoc) {
-						return undefined;
-					}
-					return buildCodeFlowGraph(currentDoc);
-				}
 				const currentDoc = deps.getCurrentDocument();
 				if (!currentDoc) {
 					return undefined;
 				}
-				return buildCircuitGraphHybrid(currentDoc);
+				let nextGraph: CircuitGraph | undefined;
+				if (scope === 'full-architecture') {
+					nextGraph = await buildProjectArchitectureGraph(currentDoc, {
+						dependencyMode: options?.dependencyMode === 'imports-calls' ? 'imports-calls' : 'imports'
+					});
+				} else if (scope === 'codeflow') {
+					nextGraph = buildCodeFlowGraph(currentDoc);
+				} else {
+					nextGraph = await buildCircuitGraphHybrid(currentDoc);
+				}
+				if (!nextGraph) {
+					return undefined;
+				}
+				if (!deps.getGraphifyContextEnabled()) {
+					return nextGraph;
+				}
+				return enrichCircuitGraphWithGraphifyContext(nextGraph, {
+					scope,
+					document: currentDoc,
+					output: deps.output
+				});
 			},
-			async (currentGraph) => {
-				return deps.requestCircuitAiEnrichment(currentGraph);
+			async (currentGraph, scope) => {
+				return deps.requestCircuitAiEnrichment(currentGraph, scope);
 			},
-			async (currentGraph, fromNodeId, toNodeId) => {
-				return deps.requestCircuitRelationExplain(currentGraph, fromNodeId, toNodeId);
+			async (currentGraph, options) => {
+				return deps.requestCircuitRelationExplain(currentGraph, options);
+			},
+			{
+				initialGraphifyContextEnabled: deps.getGraphifyContextEnabled()
 			}
 		);
 	});
@@ -208,6 +271,8 @@ export function registerPceCommands(deps: RegisterCommandsDeps): vscode.Disposab
 		selectModelCommand,
 		setListModeCommand,
 		setDeveloperModeCommand,
+		setDefinitionModeCommand,
+		toggleGraphifyContextCommand,
 		goToFunctionCommand,
 		openCircuitCommand,
 		openBlueprintCommand

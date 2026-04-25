@@ -12,6 +12,7 @@ export const circuitBody = `<div id="hud">
     </div>
     <div class="card hud-main-card">
       <div class="title">Circuit Mode</div>
+      <div id="graphifyContextIndicator" class="graphify-pill off">Graphify Context: Off</div>
       <div class="muted">Double-click to toggle Hand mode (pan). Hold Space + drag for temporary pan. Press F to fit graph in view. Drag nodes to rearrange. Scroll to zoom. In Runtime CodeFlow, click an output port then click Context Bot to wire context (repeat same action to detach).</div>
       <div class="hud-sections">
         <div class="hud-section">
@@ -57,20 +58,8 @@ export const circuitBody = `<div id="hud">
             <button id="aiRejectAllBtn" class="mini-btn">Reject AI</button>
           </div>
         </div>
-        <div class="hud-section">
-          <div class="hud-section-title">Relation Explain</div>
-          <div class="hud-option-grid">
-            <button id="relationSetFromBtn" class="mini-btn">Set From</button>
-            <button id="relationSetToBtn" class="mini-btn">Set To</button>
-            <button id="relationExplainBtn" class="mini-btn">Explain</button>
-            <button id="relationResetBtn" class="mini-btn">Reset</button>
-          </div>
-          <div id="relationState">From: none | To: none</div>
-        </div>
       </div>
       <div id="modeHint">Architecture view: grouped by layers.</div>
-      <div id="aiInsights"></div>
-      <div id="aiSuggestions"></div>
     </div>
     <div class="card hud-selection-card">
       <div class="title">Selection</div>
@@ -78,6 +67,23 @@ export const circuitBody = `<div id="hud">
       <div id="selectionActions" class="mode-row">
         <button id="includeExternalBtn" class="mini-btn">Include external neighbors</button>
         <button id="disconnectContextBtn" class="mini-btn">Disconnect connection</button>
+      </div>
+    </div>
+  </div>
+  <div id="relationChatDrawer" class="relation-chat-drawer">
+    <div id="relationChatHeader" class="relation-chat-header">
+      <div class="relation-chat-header-copy">
+        <div class="relation-chat-title">Relation Chat</div>
+        <div id="relationState" class="relation-chat-subtitle">From: none | To: none</div>
+      </div>
+      <button id="relationChatToggleBtn" class="relation-chat-toggle-btn" aria-label="Collapse relation chat" title="Collapse relation chat">&#8722;</button>
+    </div>
+    <div id="relationChatBody" class="relation-chat-body">
+      <div id="relationChatTimeline" class="relation-chat-timeline"></div>
+      <div class="relation-chat-footer">
+        <div class="relation-chat-composer-row">
+          <textarea id="relationChatInput" class="relation-chat-input" rows="2" placeholder="Ctrl+click node for From, Ctrl+click another for To. Commands: /explain, /reset, /export file.md -e|-u, /read file.md"></textarea>
+        </div>
       </div>
     </div>
   </div>
