@@ -2,7 +2,9 @@
 
 Mushroom PCE is a VS Code extension that helps you understand code faster with AI explanations and an interactive Circuit Mode.
 
-![Mushroom PCE Circuit Mode](images/feature-circuit.png)
+![Mushroom PCE Circuit Mode](docs/Mushroom%20PCE%201.png)
+![Mushroom PCE Circuit Mode](docs/Mushroom%20PCE%202.png)
+![Mushroom PCE Circuit Mode](docs/Mushroom%20PCE%203.png)
 
 ## Key Features
 
