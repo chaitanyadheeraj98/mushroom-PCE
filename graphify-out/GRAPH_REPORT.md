@@ -1,12 +1,12 @@
-# Graph Report - D:\My Websites\Mushroom\mushroom-pce  (2026-04-22)
+# Graph Report - D:\My Websites\Mushroom\mushroom-pce  (2026-04-24)
 
 ## Corpus Check
-- 56 files · ~86,464 words
+- 55 files · ~95,196 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 446 nodes · 805 edges · 40 communities detected
-- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 76 edges (avg confidence: 0.8)
+- 472 nodes · 858 edges · 38 communities detected
+- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 78 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -48,8 +48,6 @@
 - [[_COMMUNITY_Community 35|Community 35]]
 - [[_COMMUNITY_Community 36|Community 36]]
 - [[_COMMUNITY_Community 37|Community 37]]
-- [[_COMMUNITY_Community 38|Community 38]]
-- [[_COMMUNITY_Community 39|Community 39]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `collectTypeScriptConcepts()` - 29 edges
@@ -60,17 +58,17 @@
 6. `CircuitDetailsPanel` - 12 edges
 7. `buildCircuitGraphHybrid()` - 12 edges
 8. `collectCallHierarchyFileNeighbors()` - 12 edges
-9. `AiJobOrchestrator` - 11 edges
-10. `requestModelText()` - 10 edges
+9. `BlueprintPanel` - 11 edges
+10. `AiJobOrchestrator` - 11 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `requestModelText()` --calls--> `askBlueprintChat()`  [INFERRED]
-  D:\My Websites\Mushroom\mushroom-pce\src\services\ai\requestModelText.ts → D:\My Websites\Mushroom\mushroom-pce\src\services\blueprint\buildBlueprintPlan.ts
 - `explainCode()` --calls--> `requestModelText()`  [INFERRED]
   D:\My Websites\Mushroom\mushroom-pce\src\app\activate.ts → D:\My Websites\Mushroom\mushroom-pce\src\services\ai\requestModelText.ts
 - `tryGetSymbolSnippet()` --calls--> `getNormalizedDocumentSymbols()`  [INFERRED]
   D:\My Websites\Mushroom\mushroom-pce\src\controllers\circuit\CircuitDetailsPanelController.ts → D:\My Websites\Mushroom\mushroom-pce\src\services\symbols\documentSymbols.ts
 - `requestModelText()` --calls--> `generateBlueprintPlan()`  [INFERRED]
+  D:\My Websites\Mushroom\mushroom-pce\src\services\ai\requestModelText.ts → D:\My Websites\Mushroom\mushroom-pce\src\services\blueprint\buildBlueprintPlan.ts
+- `requestModelText()` --calls--> `askBlueprintChat()`  [INFERRED]
   D:\My Websites\Mushroom\mushroom-pce\src\services\ai\requestModelText.ts → D:\My Websites\Mushroom\mushroom-pce\src\services\blueprint\buildBlueprintPlan.ts
 - `requestModelText()` --calls--> `enrichCircuitGraphWithAi()`  [INFERRED]
   D:\My Websites\Mushroom\mushroom-pce\src\services\ai\requestModelText.ts → D:\My Websites\Mushroom\mushroom-pce\src\services\circuit\ai\enrichCircuitGraph.ts
@@ -82,23 +80,23 @@ Cohesion: 0.09
 Nodes (52): addUnique(), buildGenericConceptOutput(), buildListModeOutput(), buildTypeScriptConceptOutput(), cleanTypeText(), collectClass(), collectExportNames(), collectImport() (+44 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.09
-Nodes (27): dedupeLinkedFiles(), pickHighPriorityCircuitNodes(), AiJobCancelledError, AiJobOrchestrator, isAiJobCancelledError(), AnalysisCache, collectMessageTypeCheck(), getStringLiteralComparisonValue() (+19 more)
+Cohesion: 0.1
+Nodes (23): AiJobCancelledError, AiJobOrchestrator, isAiJobCancelledError(), AnalysisCache, collectMessageTypeCheck(), getStringLiteralComparisonValue(), explainCircuitNodeRelationWithAi(), findShortestPath() (+15 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.1
-Nodes (9): main(), markdownToChatHtml(), escapeHtml(), extractTokenCandidates(), markdownToHtml(), pickPreferredSymbol(), resolveSymbolForToken(), sectionKeyFromHeading() (+1 more)
+Cohesion: 0.09
+Nodes (22): activateApp(), buildGraphifyPathPairs(), buildGraphifySmartQueries(), buildLinkedFileSnippet(), buildRoleExplanation(), chooseSnippetCenterLine(), classifySystemRole(), collectLinkedMetricsFromOutput() (+14 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.12
-Nodes (18): activateApp(), buildGraphifyPathPairs(), buildGraphifySmartQueries(), buildLinkedFileSnippet(), buildRoleExplanation(), chooseSnippetCenterLine(), classifySystemRole(), collectLinkedMetricsFromOutput() (+10 more)
+Cohesion: 0.1
+Nodes (11): main(), markdownToChatHtml(), escapeHtml(), extractTokenCandidates(), inlineMd(), linkPlainSymbolsInHtml(), markdownToHtml(), pickPreferredSymbol() (+3 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.16
-Nodes (26): buildArtifactsPrompt(), buildImplementationPrompt(), buildLineStarts(), buildPlanningTurnPrompt(), buildTargetedFunctionContext(), continueBlueprintPlanningTurn(), decodeUtf8(), dedupeFunctionTargets() (+18 more)
+Cohesion: 0.13
+Nodes (32): askBlueprintChat(), buildArtifactsPrompt(), buildImplementationPrompt(), buildJsonRepairPrompt(), buildLineStarts(), buildPlanningTurnPrompt(), buildTargetedFunctionContext(), continueBlueprintPlanningTurn() (+24 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.16
+Cohesion: 0.17
 Nodes (11): CircuitDetailsPanel, describeEdge(), getFileSnippet(), getImportsBlockSnippet(), getNonce(), getSnippet(), isImportsNode(), renderEmptyHtml() (+3 more)
 
 ### Community 6 - "Community 6"
@@ -118,40 +116,40 @@ Cohesion: 0.25
 Nodes (17): buildAdaptiveQueries(), buildCacheKey(), buildPathPairs(), capText(), collectFileMentions(), collectNeighborEvidence(), fallback(), formatReason() (+9 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.16
+Cohesion: 0.15
 Nodes (5): buildCircuitHtml(), CircuitPanel, buildCircuitWebviewScript(), buildCircuitPanelHtml(), getNonce()
 
 ### Community 11 - "Community 11"
+Cohesion: 0.26
+Nodes (16): buildCandidateRecord(), decodeUtf8(), findBestFeatureMatch(), fnv1a(), generateFeatureId(), listBlueprintFeatureOptions(), loadBlueprintFeatureRegistry(), normalizePath() (+8 more)
+
+### Community 12 - "Community 12"
+Cohesion: 0.22
+Nodes (12): buildBlueprintGraph(), buildBlueprintPrompt(), generateBlueprintPlan(), mapPlanNode(), normalizePlanNodes(), parseBlueprintEnvelope(), safeJson(), buildCompactGraphContext() (+4 more)
+
+### Community 13 - "Community 13"
+Cohesion: 0.16
+Nodes (2): BlueprintPanel, getNonce()
+
+### Community 14 - "Community 14"
 Cohesion: 0.29
 Nodes (13): buildGlobalSkeletonGraph(), classifyLayerFromName(), ensureNode(), findNodeByLocation(), isTypeScriptLibFile(), isWorkspaceUri(), makeExternalNodeId(), mergeFallbackOneHop() (+5 more)
 
-### Community 12 - "Community 12"
+### Community 15 - "Community 15"
 Cohesion: 0.29
 Nodes (12): buildBlueprintGraphifyContext(), buildGraphSnapshot(), capText(), extractFocusTerms(), formatReason(), isDeclarationFilePath(), readFileIfExists(), runBlueprintPaths() (+4 more)
 
-### Community 13 - "Community 13"
+### Community 16 - "Community 16"
 Cohesion: 0.22
 Nodes (10): explainCode(), buildListFormatPolishPrompt(), buildNodeDetailsPrompt(), buildPrompt(), formatNodeGraphifyEvidence(), runListModePipeline(), isStrictListMarkdownShape(), parseListStructure() (+2 more)
 
-### Community 14 - "Community 14"
-Cohesion: 0.2
-Nodes (2): BlueprintPanel, getNonce()
-
-### Community 15 - "Community 15"
-Cohesion: 0.39
-Nodes (8): askBlueprintChat(), buildBlueprintGraph(), buildBlueprintPrompt(), generateBlueprintPlan(), mapPlanNode(), normalizePlanNodes(), parseBlueprintEnvelope(), safeJson()
-
-### Community 16 - "Community 16"
+### Community 17 - "Community 17"
 Cohesion: 0.39
 Nodes (5): addDocumentSymbols(), buildProjectArchitectureGraph(), inferLayerFromPath(), isLikelyCodeFile(), pickWorkspaceFolder()
 
-### Community 17 - "Community 17"
+### Community 18 - "Community 18"
 Cohesion: 0.36
 Nodes (5): getNormalizedDocumentSymbols(), isDocumentSymbolArray(), sortSymbols(), mapSymbolKind(), parseSymbolLocations()
-
-### Community 18 - "Community 18"
-Cohesion: 0.48
-Nodes (5): buildCompactGraphContext(), buildPrompt(), enrichCircuitGraphWithAi(), safeJson(), tryParseEnvelope()
 
 ### Community 19 - "Community 19"
 Cohesion: 0.43
@@ -229,14 +227,6 @@ Nodes (0):
 Cohesion: 1.0
 Nodes (0): 
 
-### Community 38 - "Community 38"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 39 - "Community 39"
-Cohesion: 1.0
-Nodes (0): 
-
 ## Knowledge Gaps
 - **Thin community `Community 24`** (2 nodes): `detectLanguageWarning.ts`, `detectLanguageMismatchWarning()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -252,39 +242,35 @@ Nodes (0):
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 30`** (1 nodes): `eslint.config.mjs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 31`** (1 nodes): `openCircuitCommand.ts`
+- **Thin community `Community 31`** (1 nodes): `appTypes.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 32`** (1 nodes): `startPceCommand.ts`
+- **Thin community `Community 32`** (1 nodes): `circuitTypes.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 33`** (1 nodes): `appTypes.ts`
+- **Thin community `Community 33`** (1 nodes): `messages.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 34`** (1 nodes): `circuitTypes.ts`
+- **Thin community `Community 34`** (1 nodes): `extension.test.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 35`** (1 nodes): `messages.ts`
+- **Thin community `Community 35`** (1 nodes): `circuitStyles.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 36`** (1 nodes): `extension.test.ts`
+- **Thin community `Community 36`** (1 nodes): `detailsStyles.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 37`** (1 nodes): `circuitStyles.ts`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 38`** (1 nodes): `detailsStyles.ts`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 39`** (1 nodes): `mushroomStyles.ts`
+- **Thin community `Community 37`** (1 nodes): `mushroomStyles.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `collectMessageTypeCheck()` connect `Community 1` to `Community 0`?**
-  _High betweenness centrality (0.188) - this node is a cross-community bridge._
-- **Why does `requestModelText()` connect `Community 4` to `Community 1`, `Community 18`, `Community 13`, `Community 15`?**
-  _High betweenness centrality (0.133) - this node is a cross-community bridge._
+  _High betweenness centrality (0.182) - this node is a cross-community bridge._
+- **Why does `requestModelText()` connect `Community 4` to `Community 16`, `Community 1`, `Community 12`?**
+  _High betweenness centrality (0.142) - this node is a cross-community bridge._
 - **Why does `explainCircuitNodeRelationWithAi()` connect `Community 1` to `Community 4`?**
-  _High betweenness centrality (0.110) - this node is a cross-community bridge._
+  _High betweenness centrality (0.113) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `getNodeGraphifyEvidence()` (e.g. with `.get()` and `.set()`) actually correct?**
   _`getNodeGraphifyEvidence()` has 2 INFERRED edges - model-reasoned connections that need verification._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.09 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**
-  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
-- **Should `Community 2` be split into smaller, more focused modules?**
   _Cohesion score 0.1 - nodes in this community are weakly interconnected._
+- **Should `Community 2` be split into smaller, more focused modules?**
+  _Cohesion score 0.09 - nodes in this community are weakly interconnected._

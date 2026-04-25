@@ -11,6 +11,7 @@ export type BlueprintConversationTurn = {
 export type BlueprintPlannerAssistantTurn = {
 	message: string;
 	unresolvedQuestions: string[];
+	parseWarning?: string;
 };
 
 export type BlueprintSpecFunctionRef = {
@@ -58,6 +59,9 @@ export type BlueprintPlanningArtifacts = {
 		status: 'draft' | 'saved';
 		matchedExistingFeatureId?: string;
 		overlapScore?: number;
+		isForcedLink?: boolean;
+		forcedFeatureId?: string;
+		matchBand?: 'high' | 'medium' | 'low';
 	};
 };
 
@@ -106,6 +110,30 @@ type PlannerSpecEnvelope = {
 	acceptanceCriteria?: string[];
 };
 
+const BEGIN_BLUEPRINT_JSON = 'BEGIN_BLUEPRINT_JSON';
+const END_BLUEPRINT_JSON = 'END_BLUEPRINT_JSON';
+const PLANNER_TURN_SCHEMA_TEXT = `{
+  "message": "assistant response for user, can include short bullets",
+  "unresolvedQuestions": ["question 1", "question 2"]
+}`;
+const PLANNER_SPEC_SCHEMA_TEXT = `{
+  "featureName": "string",
+  "goal": "string",
+  "summary": ["high-signal implementation bullets"],
+  "userStories": ["string"],
+  "reuseFunctions": [{"name":"string","path":"src/...","inputs":["string"],"outputs":["string"],"duties":["string"]}],
+  "createFunctions": [{"name":"string","path":"src/...","inputs":["string"],"outputs":["string"],"duties":["string"]}],
+  "editFunctions": [{"name":"string","path":"src/...","inputs":["string"],"outputs":["string"],"duties":["string"]}],
+  "fileActions": [{"path":"src/...","action":"create|edit","reason":"string"}],
+  "integrationPlan": ["string"],
+  "implementationChanges": ["string"],
+  "testPlan": ["string"],
+  "assumptionsAndDefaults": ["string"],
+  "clarificationsCaptured": ["string"],
+  "openQuestions": ["string"],
+  "acceptanceCriteria": ["string"]
+}`;
+
 export async function continueBlueprintPlanningTurn(
 	model: vscode.LanguageModelChat,
 	userMessage: string,
@@ -116,12 +144,29 @@ export async function continueBlueprintPlanningTurn(
 ): Promise<BlueprintPlannerAssistantTurn> {
 	const prompt = buildPlanningTurnPrompt(userMessage, history, workspace, graphifyContextText);
 	const response = await requestModelText(model, prompt, { signal });
-	const parsed = parseEnvelope<PlannerTurnEnvelope>(response || '');
+	const parseResult = await parseEnvelopeWithRepair<PlannerTurnEnvelope>(
+		model,
+		response,
+		PLANNER_TURN_SCHEMA_TEXT,
+		signal
+	);
+	const parsed = parseResult.parsed;
+	if (!parsed) {
+		const rawText = String(response || '').trim();
+		return {
+			message: rawText || 'Planner returned an invalid structured response. Please retry the same request.',
+			unresolvedQuestions: [],
+			parseWarning: 'Planner response was not valid JSON; showing raw model text.'
+		};
+	}
 	const unresolvedQuestions = normalizeStringList(parsed?.unresolvedQuestions, 8);
 	const message = String(parsed?.message || '').trim() || fallbackAssistantMessage(unresolvedQuestions);
 	return {
 		message,
-		unresolvedQuestions
+		unresolvedQuestions,
+		parseWarning: parseResult.repaired
+			? 'Planner response required JSON repair pass; validated output is shown.'
+			: undefined
 	};
 }
 
@@ -134,7 +179,16 @@ export async function generateBlueprintPlanningArtifacts(
 ): Promise<BlueprintPlanningArtifacts> {
 	const prompt = buildArtifactsPrompt(history, workspace, graphifyContextText);
 	const response = await requestModelText(model, prompt, { signal });
-	const parsed = parseEnvelope<PlannerSpecEnvelope>(response || '');
+	const parseResult = await parseEnvelopeWithRepair<PlannerSpecEnvelope>(
+		model,
+		response,
+		PLANNER_SPEC_SCHEMA_TEXT,
+		signal
+	);
+	const parsed = parseResult.parsed;
+	if (!parsed) {
+		throwInvalidPlannerJsonResponse('Generate', response, parseResult.repairResponse);
+	}
 	const draftSpec = normalizeSpec(parsed);
 	const targetedContext = await buildTargetedFunctionContext(draftSpec, signal);
 	const spec = targetedContext
@@ -184,10 +238,11 @@ function buildPlanningTurnPrompt(
 		'- Return valid JSON only.',
 		'',
 		'OUTPUT JSON SCHEMA:',
-		'{',
-		'  "message": "assistant response for user, can include short bullets",',
-		'  "unresolvedQuestions": ["question 1", "question 2"]',
-		'}',
+		PLANNER_TURN_SCHEMA_TEXT,
+		'',
+		'OUTPUT FORMAT (strict):',
+		`- Print only ${BEGIN_BLUEPRINT_JSON} on its own line, then JSON, then ${END_BLUEPRINT_JSON} on its own line.`,
+		'- Do not include markdown, commentary, or any text outside the markers.',
 		'',
 		'RULES:',
 		'- Mention reusable existing functions/files when possible.',
@@ -200,9 +255,9 @@ function buildPlanningTurnPrompt(
 		graphifySection,
 		'',
 		'Recent Conversation:',
-		...history.slice(-18).map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`),
+		...history.slice(-18).map((turn) => `${turn.role.toUpperCase()}: ${sanitizePromptText(turn.text, 1200)}`),
 		'',
-		`Latest user message: ${userMessage}`
+		`Latest user message: ${sanitizePromptText(userMessage, 1600)}`
 	].join('\n');
 }
 
@@ -239,23 +294,11 @@ function buildArtifactsPrompt(
 		'- When Graphify context is provided, choose the right source(s) for precision and cite concrete paths/functions in your reasoning.',
 		'',
 		'OUTPUT JSON SCHEMA:',
-		'{',
-		'  "featureName": "string",',
-		'  "goal": "string",',
-		'  "summary": ["high-signal implementation bullets"],',
-		'  "userStories": ["string"],',
-		'  "reuseFunctions": [{"name":"string","path":"src/...","inputs":["string"],"outputs":["string"],"duties":["string"]}],',
-		'  "createFunctions": [{"name":"string","path":"src/...","inputs":["string"],"outputs":["string"],"duties":["string"]}],',
-		'  "editFunctions": [{"name":"string","path":"src/...","inputs":["string"],"outputs":["string"],"duties":["string"]}],',
-		'  "fileActions": [{"path":"src/...","action":"create|edit","reason":"string"}],',
-		'  "integrationPlan": ["string"],',
-		'  "implementationChanges": ["concrete file-by-file changes"],',
-		'  "testPlan": ["unit/integration/manual verification items"],',
-		'  "assumptionsAndDefaults": ["explicit assumptions or defaults chosen"],',
-		'  "clarificationsCaptured": ["string"],',
-		'  "openQuestions": ["string"],',
-		'  "acceptanceCriteria": ["string"]',
-		'}',
+		PLANNER_SPEC_SCHEMA_TEXT,
+		'',
+		'OUTPUT FORMAT (strict):',
+		`- Print only ${BEGIN_BLUEPRINT_JSON} on its own line, then JSON, then ${END_BLUEPRINT_JSON} on its own line.`,
+		'- Do not include markdown, links, commentary, or any text outside the markers.',
 		'',
 		'Constraints:',
 		'- Keep paths relative to workspace and prefer src/.',
@@ -271,7 +314,7 @@ function buildArtifactsPrompt(
 		graphifySection,
 		'',
 		'Conversation:',
-		...history.slice(-30).map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)
+		...history.slice(-30).map((turn) => `${turn.role.toUpperCase()}: ${sanitizePromptText(turn.text, 1400)}`)
 	].join('\n');
 }
 
@@ -310,7 +353,16 @@ async function refineSpecWithCodeContext(
 	].join('\n');
 
 	const response = await requestModelText(model, prompt, { signal });
-	const parsed = parseEnvelope<PlannerSpecEnvelope>(response || '');
+	const parseResult = await parseEnvelopeWithRepair<PlannerSpecEnvelope>(
+		model,
+		response,
+		PLANNER_SPEC_SCHEMA_TEXT,
+		signal
+	);
+	const parsed = parseResult.parsed;
+	if (!parsed) {
+		throwInvalidPlannerJsonResponse('Refinement', response, parseResult.repairResponse);
+	}
 	return normalizeSpec(parsed);
 }
 
@@ -552,6 +604,59 @@ function fallbackAssistantMessage(unresolvedQuestions: string[]): string {
 	return 'Got it. I have enough detail for now. You can continue refining or click Generate.';
 }
 
+function throwInvalidPlannerJsonResponse(
+	stage: 'Generate' | 'Refinement',
+	response: string | undefined,
+	repairResponse?: string
+): never {
+	const raw = String(response || '').trim();
+	const snippet = raw ? raw.slice(0, 220).replace(/\s+/g, ' ') : '(empty response)';
+	const repairRaw = String(repairResponse || '').trim();
+	const repairSnippet = repairRaw ? repairRaw.slice(0, 160).replace(/\s+/g, ' ') : '(no repair output)';
+	throw new Error(
+		`Invalid planner JSON response during ${stage}. Retry Generate and keep output in strict JSON mode. Debug: ${snippet}. Repair debug: ${repairSnippet}`
+	);
+}
+
+async function parseEnvelopeWithRepair<T extends object>(
+	model: vscode.LanguageModelChat,
+	response: string | undefined,
+	schemaText: string,
+	signal?: AbortSignal
+): Promise<{ parsed: T | undefined; repaired: boolean; repairResponse?: string }> {
+	const parsed = parseEnvelope<T>(response || '');
+	if (parsed) {
+		return { parsed, repaired: false };
+	}
+	const raw = String(response || '').trim();
+	if (!raw) {
+		return { parsed: undefined, repaired: false };
+	}
+	const repairPrompt = buildJsonRepairPrompt(raw, schemaText);
+	const repairResponse = await requestModelText(model, repairPrompt, { signal });
+	const repairedParsed = parseEnvelope<T>(repairResponse || '');
+	return {
+		parsed: repairedParsed,
+		repaired: Boolean(repairedParsed),
+		repairResponse
+	};
+}
+
+function buildJsonRepairPrompt(raw: string, schemaText: string): string {
+	return [
+		'Convert the following model output into strictly valid JSON matching this schema.',
+		'Do not change intent; only repair structure.',
+		'Output only the marker block and JSON.',
+		`Start with ${BEGIN_BLUEPRINT_JSON}, then JSON, then ${END_BLUEPRINT_JSON}.`,
+		'',
+		'Schema:',
+		schemaText,
+		'',
+		'Raw output to repair:',
+		raw
+	].join('\n');
+}
+
 function normalizeSpec(input: PlannerSpecEnvelope | undefined): BlueprintPlanningSpec {
 	const featureName = String(input?.featureName || '').trim() || 'Untitled Feature';
 	const goal = String(input?.goal || '').trim() || 'Implement the planned feature with reuse-first strategy.';
@@ -666,6 +771,10 @@ function parseEnvelope<T extends object>(text: string): T | undefined {
 	if (!trimmed) {
 		return undefined;
 	}
+	const marked = parseMarkedJsonEnvelope<T>(trimmed);
+	if (marked) {
+		return marked;
+	}
 	const direct = safeJson<T>(trimmed);
 	if (direct) {
 		return direct;
@@ -680,6 +789,28 @@ function parseEnvelope<T extends object>(text: string): T | undefined {
 		return safeJson<T>(trimmed.slice(first, last + 1));
 	}
 	return undefined;
+}
+
+function parseMarkedJsonEnvelope<T extends object>(text: string): T | undefined {
+	const beginIndex = text.indexOf(BEGIN_BLUEPRINT_JSON);
+	const endIndex = text.lastIndexOf(END_BLUEPRINT_JSON);
+	if (beginIndex < 0 || endIndex < 0 || endIndex <= beginIndex) {
+		return undefined;
+	}
+	const start = beginIndex + BEGIN_BLUEPRINT_JSON.length;
+	const candidate = text.slice(start, endIndex).trim();
+	return safeJson<T>(candidate);
+}
+
+function sanitizePromptText(text: string, maxChars: number): string {
+	const raw = String(text || '');
+	const withoutMarkdownLinks = raw.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/gi, '$1');
+	const withoutBareUrls = withoutMarkdownLinks.replace(/https?:\/\/\S+/gi, '');
+	const normalizedWhitespace = withoutBareUrls.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+	if (normalizedWhitespace.length <= maxChars) {
+		return normalizedWhitespace;
+	}
+	return `${normalizedWhitespace.slice(0, maxChars)} ...[truncated]`;
 }
 
 function safeJson<T extends object>(raw: string): T | undefined {

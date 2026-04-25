@@ -43,6 +43,14 @@ export type UpsertFeatureRegistryResult = {
 	overlapScore?: number;
 };
 
+export type BlueprintFeatureRegistryOption = {
+	featureId: string;
+	featureName: string;
+	revision: number;
+	updatedAt: number;
+	status: 'draft' | 'saved';
+};
+
 const REGISTRY_RELATIVE_PATH = 'docs/.blueprint/feature-registry.json';
 const REGISTRY_VERSION = 1 as const;
 
@@ -52,13 +60,16 @@ export async function upsertBlueprintFeatureFromArtifacts(
 	options?: {
 		status?: 'draft' | 'saved';
 		savedSpecPath?: string;
+		forcedFeatureId?: string;
 	}
 ): Promise<UpsertFeatureRegistryResult> {
 	const registry = await loadBlueprintFeatureRegistry(workspaceFolder);
 	const now = Date.now();
 	const normalizedCandidate = buildCandidateRecord(artifacts, now, options);
 
-	const forcedFeatureId = String(artifacts.featureTracking?.featureId || '').trim() || undefined;
+	const forcedFeatureId = String(
+		options?.forcedFeatureId || artifacts.featureTracking?.forcedFeatureId || artifacts.featureTracking?.featureId || ''
+	).trim() || undefined;
 	const bestMatch = findBestFeatureMatch(registry.features, normalizedCandidate, forcedFeatureId);
 	let matchedExistingFeatureId: string | undefined;
 	let overlapScore: number | undefined;
@@ -111,6 +122,21 @@ export async function upsertBlueprintFeatureFromArtifacts(
 		matchedExistingFeatureId,
 		overlapScore
 	};
+}
+
+export async function listBlueprintFeatureOptions(
+	workspaceFolder: vscode.WorkspaceFolder
+): Promise<BlueprintFeatureRegistryOption[]> {
+	const registry = await loadBlueprintFeatureRegistry(workspaceFolder);
+	return registry.features
+		.map((item) => ({
+			featureId: item.featureId,
+			featureName: item.featureName,
+			revision: item.revision,
+			updatedAt: item.updatedAt,
+			status: item.status
+		}))
+		.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 async function loadBlueprintFeatureRegistry(workspaceFolder: vscode.WorkspaceFolder): Promise<BlueprintFeatureRegistry> {

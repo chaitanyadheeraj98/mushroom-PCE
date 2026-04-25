@@ -26,7 +26,7 @@ import {
 } from '../services/blueprint/generateBlueprintCode';
 import { scanSrcWorkspaceSnapshot } from '../services/blueprint/scanWorkspaceBlueprint';
 import { buildBlueprintGraphifyContext } from '../services/graphify/blueprintGraphifyContext';
-import { upsertBlueprintFeatureFromArtifacts } from '../services/blueprint/featureRegistry';
+import { listBlueprintFeatureOptions, upsertBlueprintFeatureFromArtifacts } from '../services/blueprint/featureRegistry';
 
 export function activateApp(context: vscode.ExtensionContext) {
 	let latestRunId = 0;
@@ -700,7 +700,62 @@ export function activateApp(context: vscode.ExtensionContext) {
 						return reply;
 					}
 				}),
-			async (history) =>
+			async (request) =>
+				aiJobs.schedule({
+					lane: 'blueprint',
+					group: 'blueprint:repo-chat',
+					supersedeGroup: true,
+					priority: 65,
+					run: async (signal) => {
+						await loadModels();
+						if (signal.aborted) {
+							throw new AiJobCancelledError(String(signal.reason ?? 'Cancelled'));
+						}
+						const model = availableModels.find((m) => m.id === selectedModelId) ?? availableModels[0];
+						if (!model) {
+							throw new Error('No AI model is currently available for Blueprint repo chat.');
+						}
+						const workspace = await scanSrcWorkspaceSnapshot();
+						const graphifyContextText = graphifyContextEnabled
+							? await loadBlueprintGraphifyContextFromWorkspace(
+								request.userMessage,
+								request.history as BlueprintConversationTurn[],
+								signal
+							)
+							: undefined;
+						const wantsExplain = /\bexplain\b/i.test(request.userMessage);
+						const workspacePaths = workspace?.entries?.slice(0, 80).map((entry) => entry.path).join(', ') || 'unknown';
+						const workspaceFns = workspace?.files?.slice(0, 40).flatMap((f) => f.functions.slice(0, 5)).slice(0, 100).join(', ') || 'unknown';
+						const prompt = [
+							'You are answering a simple repository question in Mushroom Blueprint panel.',
+							'Do not output JSON. Give concise, concrete project/repo answers.',
+							'Never include chain-of-thought, internal reasoning, self-reflection, or process narration.',
+							'Never mention system/developer instructions, prompts, policies, formatting rules, or code-fence guidance.',
+							'Never talk about how to answer; only provide the answer itself.',
+							wantsExplain
+								? 'Because user asked to explain, you may provide concise explanation up to 6 bullets and 180 words.'
+								: 'Keep response ultra-brief: max 2 sentences, max 45 words, direct answer only.',
+							'If unsure, say what is unknown instead of guessing.',
+							'',
+							`User question: ${request.userMessage}`,
+							'',
+							'Recent chat context:',
+							...request.history.slice(-4).map((turn) => `${turn.role.toUpperCase()}: ${truncateRepoChatContext(turn.text, 280)}`),
+							'',
+							'Workspace path sample:',
+							workspacePaths,
+							'',
+							'Known function sample:',
+							workspaceFns,
+							'',
+							graphifyContextText?.trim() ? ['Graphify context:', graphifyContextText.trim()].join('\n') : ''
+						].filter(Boolean).join('\n');
+						const response = await requestModelText(model, prompt, { signal });
+						const raw = String(response || '').trim() || 'No response generated.';
+						return compactRepoChatAnswer(raw, wantsExplain);
+					}
+				}),
+			async (request) =>
 				aiJobs.schedule({
 					lane: 'blueprint',
 					group: 'blueprint:generate',
@@ -718,14 +773,14 @@ export function activateApp(context: vscode.ExtensionContext) {
 						const workspace = await scanSrcWorkspaceSnapshot();
 						const graphifyContextText = graphifyContextEnabled
 							? await loadBlueprintGraphifyContextFromWorkspace(
-								history.map((turn) => turn.text).join('\n'),
-								history as BlueprintConversationTurn[],
+								request.history.map((turn) => turn.text).join('\n'),
+								request.history as BlueprintConversationTurn[],
 								signal
 							)
 							: undefined;
 						const artifacts = await generateBlueprintPlanningArtifacts(
 							model,
-							history as BlueprintConversationTurn[],
+							request.history as BlueprintConversationTurn[],
 							workspace,
 							graphifyContextText,
 							signal
@@ -736,7 +791,8 @@ export function activateApp(context: vscode.ExtensionContext) {
 							return artifacts;
 						}
 						const registryUpdate = await upsertBlueprintFeatureFromArtifacts(workspaceFolder, artifacts, {
-							status: 'draft'
+							status: 'draft',
+							forcedFeatureId: request.forcedFeatureId
 						});
 						vscode.window.showInformationMessage('Blueprint prompt artifacts generated.');
 						return {
@@ -746,7 +802,10 @@ export function activateApp(context: vscode.ExtensionContext) {
 								registryPath: registryUpdate.registryPath,
 								status: registryUpdate.record.status,
 								matchedExistingFeatureId: registryUpdate.matchedExistingFeatureId,
-								overlapScore: registryUpdate.overlapScore
+								overlapScore: registryUpdate.overlapScore,
+								isForcedLink: Boolean(request.forcedFeatureId),
+								forcedFeatureId: request.forcedFeatureId || undefined,
+								matchBand: toMatchBand(registryUpdate.overlapScore)
 							}
 						};
 					}
@@ -800,14 +859,18 @@ export function activateApp(context: vscode.ExtensionContext) {
 				const savedPath = `docs/feature-plans/${fileName}`;
 				const registryUpdate = await upsertBlueprintFeatureFromArtifacts(workspaceFolder, artifacts, {
 					status: 'saved',
-					savedSpecPath: savedPath
+					savedSpecPath: savedPath,
+					forcedFeatureId: artifacts.featureTracking?.forcedFeatureId
 				});
 				artifacts.featureTracking = {
 					featureId: registryUpdate.record.featureId,
 					registryPath: registryUpdate.registryPath,
 					status: registryUpdate.record.status,
 					matchedExistingFeatureId: registryUpdate.matchedExistingFeatureId,
-					overlapScore: registryUpdate.overlapScore
+					overlapScore: registryUpdate.overlapScore,
+					isForcedLink: Boolean(artifacts.featureTracking?.forcedFeatureId),
+					forcedFeatureId: artifacts.featureTracking?.forcedFeatureId,
+					matchBand: toMatchBand(registryUpdate.overlapScore)
 				};
 				vscode.window.showInformationMessage(`Blueprint spec saved: docs/feature-plans/${fileName}`);
 				return {
@@ -815,6 +878,13 @@ export function activateApp(context: vscode.ExtensionContext) {
 					path: savedPath,
 					message: `Saved blueprint spec to ${savedPath}\nFeature ID: ${registryUpdate.record.featureId}\nRegistry: ${registryUpdate.registryPath}`
 				};
+			},
+			async () => {
+				const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+				if (!workspaceFolder) {
+					return [];
+				}
+				return listBlueprintFeatureOptions(workspaceFolder);
 			},
 			{
 				initialGraphifyContextEnabled: graphifyContextEnabled
@@ -968,6 +1038,82 @@ function renderBlueprintSpecMarkdown(artifacts: BlueprintPlanningArtifacts): str
 		'```',
 		''
 	].join('\n');
+}
+
+function toMatchBand(score: number | undefined): 'high' | 'medium' | 'low' {
+	const normalized = typeof score === 'number' && Number.isFinite(score) ? score : 0;
+	if (normalized >= 0.75) {
+		return 'high';
+	}
+	if (normalized >= 0.5) {
+		return 'medium';
+	}
+	return 'low';
+}
+
+function truncateRepoChatContext(text: string, maxChars: number): string {
+	const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+	if (normalized.length <= maxChars) {
+		return normalized;
+	}
+	return `${normalized.slice(0, maxChars)} ...[truncated]`;
+}
+
+function compactRepoChatAnswer(raw: string, allowExplain: boolean): string {
+	let text = String(raw || '').trim();
+	if (!text) {
+		return 'No response generated.';
+	}
+	// Strip common "thinking/process/meta" lead-ins if model drifts.
+	text = text
+		// Bold meta headers like "**Summarizing ...**"
+		.replace(/^\s*\*\*[^*\n]{0,140}\*\*\s*/gim, '')
+		.replace(/\*\*?(summarizing|summary|explaining|reasoning|thinking|analysis|planning|crafting|clarifying)[^*\n]*\*\*?/gi, '')
+		// Meta lead-ins like "Explaining ...:" or "Analysis:"
+		.replace(/^(summarizing|summary|explaining|reasoning|thinking|analysis|planning|crafting|clarifying)[^:\n]*:\s*/gim, '')
+		// First-person process narration
+		.replace(/^(i\s+(need|should|must|will|can)\s+to[^.\n]*[.\n]?)+/gim, '')
+		.replace(/^(let\s+me|i(?:'| a)m\s+going\s+to|i(?:'| a)m\s+ready\s+to)[^.\n]*[.\n]?/gim, '')
+		.replace(/^(here(?:'| i)s\s+(a\s+)?(concise|brief|short)\s+(summary|answer)[:\-\s]*)/gim, '')
+		.trim();
+	text = text.replace(/\n{3,}/g, '\n\n').trim();
+	text = stripMetaSentences(text);
+	if (allowExplain) {
+		const words = text.split(/\s+/).filter(Boolean);
+		if (words.length <= 180) {
+			return text;
+		}
+		return `${words.slice(0, 180).join(' ')} ...`;
+	}
+	const compact = text.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+	const words = compact.split(/\s+/).filter(Boolean);
+	const limited = words.slice(0, 45).join(' ');
+	return limited || 'No response generated.';
+}
+
+function stripMetaSentences(text: string): string {
+	const normalized = String(text || '').replace(/\r/g, '').trim();
+	if (!normalized) {
+		return normalized;
+	}
+	const sentenceLike = normalized
+		.split(/(?<=[.!?])\s+|\n+/)
+		.map((part) => part.trim())
+		.filter(Boolean);
+	const banned = [
+		/\bdeveloper\b/i,
+		/\bsystem\b/i,
+		/\binstruction(s)?\b/i,
+		/\bprompt\b/i,
+		/\bpolicy\b/i,
+		/\bformat(ting)?\b/i,
+		/\bcode\s*block\b/i,
+		/\btriple\s*backtick\b/i,
+		/\bshould\s+avoid\b/i,
+		/\bI need to\b/i
+	];
+	const kept = sentenceLike.filter((sentence) => !banned.some((pattern) => pattern.test(sentence)));
+	return (kept.length ? kept.join(' ') : normalized).trim();
 }
 
 
